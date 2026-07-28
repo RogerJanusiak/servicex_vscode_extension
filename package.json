@@ -1,0 +1,34 @@
+{
+  "name": "servicex-vscode-extension",
+  "displayName": "ServiceX",
+  "description": "Manage ServiceX transform caches and jobs from VS Code",
+  "version": "0.0.1",
+  "publisher": "iris-hep",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "servicex.helloWorld",
+        "title": "ServiceX: Hello World"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
