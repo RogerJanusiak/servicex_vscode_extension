@@ -98,3 +98,15 @@ export function selectEndpoint(config: ServiceXConfig, backendName?: string): En
   }
   return found;
 }
+
+/**
+ * All configured endpoints, ordered with the selected/default one first and
+ * every other configured backend after it (in whatever order they appear in
+ * the config file). Used to fall back to other backends when a request
+ * can't be found on the default one.
+ */
+export function orderedEndpoints(config: ServiceXConfig, backendName?: string): EndpointConfig[] {
+  const selected = selectEndpoint(config, backendName);
+  const others = config.endpoints.filter((e) => e.name !== selected.name);
+  return [selected, ...others];
+}

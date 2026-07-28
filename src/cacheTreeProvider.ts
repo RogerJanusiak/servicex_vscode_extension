@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { loadConfig, selectEndpoint } from './config';
+import { loadConfig, orderedEndpoints } from './config';
 import { ServiceXApi, NotFoundError } from './serviceXApi';
 import { readCacheRecords, completedRecords, submittedRecords, CacheDbRecord } from './cacheDb';
 
@@ -12,6 +12,9 @@ export interface CacheEntry {
   files: number;
   filesFailed: number;
   stale: boolean;
+  /** Name of the backend the request was actually found on, only set when
+   *  that isn't the default/selected backend (i.e. a fallback was used). */
+  backend?: string;
 }
 
 function formatDateTime(value?: Date): string {
@@ -70,15 +73,17 @@ class MessageItem extends vscode.TreeItem {
 export class RequestItem extends vscode.TreeItem {
   constructor(public readonly entry: CacheEntry) {
     super(entry.status, vscode.TreeItemCollapsibleState.None);
-    this.description = `${formatDateTime(entry.submitTime)} → ${formatDateTime(
-      entry.finishTime
-    )} · ${entry.files - entry.filesFailed}/${entry.files} ok`;
+    this.description =
+      `${formatDateTime(entry.submitTime)} → ${formatDateTime(entry.finishTime)} · ` +
+      `${entry.files - entry.filesFailed}/${entry.files} ok` +
+      (entry.backend ? ` · via ${entry.backend}` : '');
     this.tooltip = [
       `Request ID: ${entry.requestId}`,
       `Status: ${entry.status}`,
       `Submitted: ${formatDateTime(entry.submitTime)}`,
       `Finished: ${formatDateTime(entry.finishTime)}`,
       `Files: ${entry.files}  Failed: ${entry.filesFailed}`,
+      ...(entry.backend ? [`Backend: ${entry.backend}`] : []),
     ].join('\n');
     if (entry.stale) {
       this.iconPath = new vscode.ThemeIcon('warning');
@@ -131,8 +136,12 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     const settings = vscode.workspace.getConfiguration('servicex');
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
-    const endpointConfig = selectEndpoint(config, settings.get<string>('backend') || undefined);
-    const api = new ServiceXApi(endpointConfig.endpoint, endpointConfig.token);
+    const endpoints = orderedEndpoints(config, settings.get<string>('backend') || undefined);
+    const defaultBackendName = endpoints[0].name;
+    const namedApis = endpoints.map((e) => ({
+      name: e.name,
+      api: new ServiceXApi(e.endpoint, e.token),
+    }));
 
     const records = readCacheRecords(config.cachePath);
     const localByRequestId = new Map<string, CacheDbRecord>();
@@ -142,45 +151,72 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       }
     }
 
-    return Promise.all(
+    const entries = await Promise.all(
       Array.from(localByRequestId.entries()).map(([requestId, local]) =>
-        fetchOneEntry(api, requestId, local)
+        fetchOneEntry(namedApis, requestId, local)
       )
     );
+
+    // Only show which backend each request came from if at least one of
+    // them actually needed a fallback - otherwise it's just noise, since
+    // every row would say the same (default) backend.
+    const anyNonDefault = entries.some((e) => e.backend && e.backend !== defaultBackendName);
+    if (!anyNonDefault) {
+      for (const e of entries) {
+        e.backend = undefined;
+      }
+    }
+
+    return entries;
   }
 }
 
 async function fetchOneEntry(
-  api: ServiceXApi,
+  apis: { name: string; api: ServiceXApi }[],
   requestId: string,
   local: CacheDbRecord
 ): Promise<CacheEntry> {
-  try {
-    const remote = await api.getTransformStatus(requestId);
-    return {
-      requestId,
-      title: remote.title || local.title || 'No Title',
-      status: remote.status,
-      submitTime: remote.submitTime,
-      finishTime: remote.finishTime,
-      files: remote.files,
-      filesFailed: remote.filesFailed,
-      stale: false,
-    };
-  } catch (e) {
-    // Backend returns 404 when the request no longer exists there, which
-    // happens if it was deleted server-side but is still cached locally.
-    return {
-      requestId,
-      title: local.title || 'No Title',
-      status: e instanceof NotFoundError ? 'Not found on server' : `Error: ${(e as Error).message}`,
-      submitTime: local.submit_time ? new Date(local.submit_time) : undefined,
-      finishTime: undefined,
-      files: 0,
-      filesFailed: 0,
-      stale: true,
-    };
+  let lastError: unknown;
+
+  for (const { name, api } of apis) {
+    try {
+      const remote = await api.getTransformStatus(requestId);
+      return {
+        requestId,
+        title: remote.title || local.title || 'No Title',
+        status: remote.status,
+        submitTime: remote.submitTime,
+        finishTime: remote.finishTime,
+        files: remote.files,
+        filesFailed: remote.filesFailed,
+        stale: false,
+        backend: name,
+      };
+    } catch (e) {
+      lastError = e;
+      if (e instanceof NotFoundError) {
+        // Not on this backend - try the next configured one before giving up.
+        continue;
+      }
+      // Any other failure (auth, network, server error) - don't keep trying
+      // other backends for it, surface it directly.
+      break;
+    }
   }
+
+  return {
+    requestId,
+    title: local.title || 'No Title',
+    status:
+      lastError instanceof NotFoundError
+        ? 'Not found on any backend'
+        : `Error: ${(lastError as Error).message}`,
+    submitTime: local.submit_time ? new Date(local.submit_time) : undefined,
+    finishTime: undefined,
+    files: 0,
+    filesFailed: 0,
+    stale: true,
+  };
 }
 
 /**
