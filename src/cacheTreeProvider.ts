@@ -1,0 +1,191 @@
+import * as vscode from 'vscode';
+import { loadConfig, selectEndpoint } from './config';
+import { ServiceXApi, NotFoundError } from './serviceXApi';
+import { readCacheRecords, completedRecords, submittedRecords, CacheDbRecord } from './cacheDb';
+
+interface CacheEntry {
+  requestId: string;
+  title: string;
+  status: string;
+  submitTime?: Date;
+  finishTime?: Date;
+  files: number;
+  filesFailed: number;
+  stale: boolean;
+}
+
+function formatDateTime(value?: Date): string {
+  if (!value) {
+    return '-';
+  }
+  return value.toLocaleString(undefined, {
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+class TitleGroupItem extends vscode.TreeItem {
+  constructor(public readonly title: string, public readonly entries: CacheEntry[]) {
+    super(title, vscode.TreeItemCollapsibleState.Expanded);
+    this.description = `${entries.length} request${entries.length === 1 ? '' : 's'}`;
+    this.contextValue = 'servicexTitleGroup';
+  }
+}
+
+/** A plain informational row with no children - used for empty/error states. */
+class MessageItem extends vscode.TreeItem {
+  constructor(message: string, icon?: string) {
+    super(message, vscode.TreeItemCollapsibleState.None);
+    if (icon) {
+      this.iconPath = new vscode.ThemeIcon(icon);
+    }
+  }
+}
+
+class RequestItem extends vscode.TreeItem {
+  constructor(entry: CacheEntry) {
+    super(entry.status, vscode.TreeItemCollapsibleState.None);
+    this.description = `${formatDateTime(entry.submitTime)} → ${formatDateTime(
+      entry.finishTime
+    )} · ${entry.files - entry.filesFailed}/${entry.files} ok`;
+    this.tooltip = [
+      `Request ID: ${entry.requestId}`,
+      `Status: ${entry.status}`,
+      `Submitted: ${formatDateTime(entry.submitTime)}`,
+      `Finished: ${formatDateTime(entry.finishTime)}`,
+      `Files: ${entry.files}  Failed: ${entry.filesFailed}`,
+    ].join('\n');
+    if (entry.stale) {
+      this.iconPath = new vscode.ThemeIcon('warning');
+    }
+    this.contextValue = 'servicexCacheRequest';
+  }
+}
+
+type CacheNode = TitleGroupItem | RequestItem | MessageItem;
+
+export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
+  private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+  private groups: TitleGroupItem[] = [];
+  private loaded = false;
+
+  refresh(): void {
+    this.loaded = false;
+    this._onDidChangeTreeData.fire();
+  }
+
+  getTreeItem(element: CacheNode): vscode.TreeItem {
+    return element;
+  }
+
+  async getChildren(element?: CacheNode): Promise<CacheNode[]> {
+    if (element instanceof TitleGroupItem) {
+      return element.entries.map((e) => new RequestItem(e));
+    }
+    if (element) {
+      return [];
+    }
+
+    if (!this.loaded) {
+      try {
+        this.groups = groupByTitle(await this.fetchEntries());
+      } catch (e) {
+        this.groups = [];
+        this.loaded = true;
+        return [new MessageItem(`Error: ${(e as Error).message}`, 'error')];
+      }
+      this.loaded = true;
+    }
+
+    return this.groups.length ? this.groups : [new MessageItem('No cached transform requests found.')];
+  }
+
+  private async fetchEntries(): Promise<CacheEntry[]> {
+    const settings = vscode.workspace.getConfiguration('servicex');
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
+    const endpointConfig = selectEndpoint(config, settings.get<string>('backend') || undefined);
+    const api = new ServiceXApi(endpointConfig.endpoint, endpointConfig.token);
+
+    const records = readCacheRecords(config.cachePath);
+    const localByRequestId = new Map<string, CacheDbRecord>();
+    for (const r of [...completedRecords(records), ...submittedRecords(records)]) {
+      if (r.request_id) {
+        localByRequestId.set(r.request_id, r);
+      }
+    }
+
+    return Promise.all(
+      Array.from(localByRequestId.entries()).map(([requestId, local]) =>
+        fetchOneEntry(api, requestId, local)
+      )
+    );
+  }
+}
+
+async function fetchOneEntry(
+  api: ServiceXApi,
+  requestId: string,
+  local: CacheDbRecord
+): Promise<CacheEntry> {
+  try {
+    const remote = await api.getTransformStatus(requestId);
+    return {
+      requestId,
+      title: remote.title || local.title || 'No Title',
+      status: remote.status,
+      submitTime: remote.submitTime,
+      finishTime: remote.finishTime,
+      files: remote.files,
+      filesFailed: remote.filesFailed,
+      stale: false,
+    };
+  } catch (e) {
+    // Backend returns 404 when the request no longer exists there, which
+    // happens if it was deleted server-side but is still cached locally.
+    return {
+      requestId,
+      title: local.title || 'No Title',
+      status: e instanceof NotFoundError ? 'Not found on server' : `Error: ${(e as Error).message}`,
+      submitTime: local.submit_time ? new Date(local.submit_time) : undefined,
+      finishTime: undefined,
+      files: 0,
+      filesFailed: 0,
+      stale: true,
+    };
+  }
+}
+
+/**
+ * Group entries with the same title together, then sort within each group
+ * by submit time (newest first). Groups themselves are ordered by their most
+ * recent submit time. Mirrors core._group_by_title in the Python CLI.
+ */
+function groupByTitle(entries: CacheEntry[]): TitleGroupItem[] {
+  const byTitle = new Map<string, CacheEntry[]>();
+  for (const e of entries) {
+    const bucket = byTitle.get(e.title);
+    if (bucket) {
+      bucket.push(e);
+    } else {
+      byTitle.set(e.title, [e]);
+    }
+  }
+
+  const groups = Array.from(byTitle.entries()).map(([title, groupEntries]) => {
+    groupEntries.sort((a, b) => (b.submitTime?.getTime() ?? 0) - (a.submitTime?.getTime() ?? 0));
+    return { title, groupEntries };
+  });
+
+  groups.sort(
+    (a, b) => (b.groupEntries[0].submitTime?.getTime() ?? 0) - (a.groupEntries[0].submitTime?.getTime() ?? 0)
+  );
+
+  return groups.map((g) => new TitleGroupItem(g.title, g.groupEntries));
+}

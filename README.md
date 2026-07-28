@@ -3,9 +3,8 @@
 A VS Code extension for managing [ServiceX](https://github.com/ssl-hep/ServiceX_frontend)
 transform caches and jobs.
 
-This is currently a minimal scaffold with a single `ServiceX: Hello World`
-command, used to confirm the extension loads and runs correctly before
-building out real cache-management features.
+It adds a "ServiceX" icon to the Activity Bar with a "Cached Transforms" view,
+which lists every transform request in your local ServiceX cache.
 
 ## Development
 

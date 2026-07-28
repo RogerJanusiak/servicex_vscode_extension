@@ -16,10 +16,52 @@
   "contributes": {
     "commands": [
       {
-        "command": "servicex.helloWorld",
-        "title": "ServiceX: Hello World"
+        "command": "servicex.refreshCache",
+        "title": "ServiceX: Refresh Cached Transforms",
+        "icon": "$(refresh)"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "servicex",
+          "title": "ServiceX",
+          "icon": "resources/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "servicex": [
+        {
+          "id": "servicexCacheView",
+          "name": "Cached Transforms"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "servicex.refreshCache",
+          "when": "view == servicexCacheView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ServiceX",
+      "properties": {
+        "servicex.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a specific servicex.yaml/.servicex file. If empty, searches the workspace folder (and its parents) then the home directory, same as the servicex CLI."
+        },
+        "servicex.backend": {
+          "type": "string",
+          "default": "",
+          "description": "Name of the backend endpoint to use from the config file. If empty, uses the config file's default-endpoint (or the first endpoint listed)."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -30,5 +72,8 @@
     "@types/node": "^20.x",
     "@types/vscode": "^1.85.0",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }
