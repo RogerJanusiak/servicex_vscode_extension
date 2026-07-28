@@ -22,3 +22,7 @@ npm install
 
 Then open this folder in VS Code and press `F5` to launch an Extension
 Development Host with the extension loaded.
+
+## License
+
+[BSD 3-Clause](LICENSE)

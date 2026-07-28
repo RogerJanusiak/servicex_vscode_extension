@@ -2,9 +2,18 @@
   "name": "servicex-vscode-extension",
   "displayName": "ServiceX",
   "description": "Manage ServiceX transform caches and jobs from VS Code",
-  "version": "0.0.1",
-  "publisher": "iris-hep",
-  "private": true,
+  "version": "0.1.0",
+  "publisher": "RogerJanusiak",
+  "license": "BSD-3-Clause",
+  "icon": "resources/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RogerJanusiak/servicex_vscode_extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RogerJanusiak/servicex_vscode_extension/issues"
+  },
+  "homepage": "https://github.com/RogerJanusiak/servicex_vscode_extension#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -103,6 +112,7 @@
   "devDependencies": {
     "@types/node": "^20.x",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.4.0"
   },
   "dependencies": {
