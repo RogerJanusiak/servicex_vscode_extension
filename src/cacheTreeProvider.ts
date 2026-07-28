@@ -42,23 +42,23 @@ export class TitleGroupItem extends vscode.TreeItem {
 
 /**
  * Decide which cached requests in a title group should be removed by
- * "Clean": every Cancelled request (regardless of age), plus every Complete
- * request except the most recently submitted one.
+ * "Clean": every Cancelled or Failed request (regardless of age), plus every
+ * Complete request except the most recently submitted one.
  *
  * Deliberately based on the group's already-fetched CacheEntry[] (backend
  * status) rather than the local db.json's status field - a request can sit
  * cached locally as "SUBMITTED" indefinitely if nothing ever polled it again
- * after it was cancelled server-side, so the local status alone can't be
- * trusted to identify cancelled runs.
+ * after it finished (or failed) server-side, so the local status alone
+ * can't be trusted to identify these.
  */
 export function computeCleanPlan(entries: CacheEntry[]): CacheEntry[] {
   const complete = entries.filter((e) => e.status === 'Complete');
   complete.sort((a, b) => (b.submitTime?.getTime() ?? 0) - (a.submitTime?.getTime() ?? 0));
   const staleComplete = complete.slice(1);
 
-  const cancelled = entries.filter((e) => e.status === 'Canceled');
+  const cancelledOrFailed = entries.filter((e) => e.status === 'Canceled' || e.status === 'Fatal');
 
-  return [...staleComplete, ...cancelled];
+  return [...staleComplete, ...cancelledOrFailed];
 }
 
 /** A plain informational row with no children - used for empty/error states. */
