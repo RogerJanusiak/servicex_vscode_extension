@@ -19,6 +19,21 @@
         "command": "servicex.refreshCache",
         "title": "ServiceX: Refresh Cached Transforms",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "servicex.deleteFromCache",
+        "title": "ServiceX: Delete from Cache",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "servicex.cleanGroup",
+        "title": "ServiceX: Clean Old Requests",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "servicex.deleteGroup",
+        "title": "ServiceX: Delete Entire Group",
+        "icon": "$(trash)"
       }
     ],
     "viewsContainers": {
@@ -44,6 +59,23 @@
           "command": "servicex.refreshCache",
           "when": "view == servicexCacheView",
           "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "servicex.deleteFromCache",
+          "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
+          "group": "inline"
+        },
+        {
+          "command": "servicex.cleanGroup",
+          "when": "view == servicexCacheView && viewItem == servicexTitleGroup",
+          "group": "inline"
+        },
+        {
+          "command": "servicex.deleteGroup",
+          "when": "view == servicexCacheView && viewItem == servicexTitleGroup",
+          "group": "inline"
         }
       ]
     },

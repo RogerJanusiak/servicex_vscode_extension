@@ -3,7 +3,7 @@ import { loadConfig, selectEndpoint } from './config';
 import { ServiceXApi, NotFoundError } from './serviceXApi';
 import { readCacheRecords, completedRecords, submittedRecords, CacheDbRecord } from './cacheDb';
 
-interface CacheEntry {
+export interface CacheEntry {
   requestId: string;
   title: string;
   status: string;
@@ -28,12 +28,33 @@ function formatDateTime(value?: Date): string {
   });
 }
 
-class TitleGroupItem extends vscode.TreeItem {
+export class TitleGroupItem extends vscode.TreeItem {
   constructor(public readonly title: string, public readonly entries: CacheEntry[]) {
     super(title, vscode.TreeItemCollapsibleState.Expanded);
     this.description = `${entries.length} request${entries.length === 1 ? '' : 's'}`;
     this.contextValue = 'servicexTitleGroup';
   }
+}
+
+/**
+ * Decide which cached requests in a title group should be removed by
+ * "Clean": every Cancelled request (regardless of age), plus every Complete
+ * request except the most recently submitted one.
+ *
+ * Deliberately based on the group's already-fetched CacheEntry[] (backend
+ * status) rather than the local db.json's status field - a request can sit
+ * cached locally as "SUBMITTED" indefinitely if nothing ever polled it again
+ * after it was cancelled server-side, so the local status alone can't be
+ * trusted to identify cancelled runs.
+ */
+export function computeCleanPlan(entries: CacheEntry[]): CacheEntry[] {
+  const complete = entries.filter((e) => e.status === 'Complete');
+  complete.sort((a, b) => (b.submitTime?.getTime() ?? 0) - (a.submitTime?.getTime() ?? 0));
+  const staleComplete = complete.slice(1);
+
+  const cancelled = entries.filter((e) => e.status === 'Canceled');
+
+  return [...staleComplete, ...cancelled];
 }
 
 /** A plain informational row with no children - used for empty/error states. */
@@ -46,8 +67,8 @@ class MessageItem extends vscode.TreeItem {
   }
 }
 
-class RequestItem extends vscode.TreeItem {
-  constructor(entry: CacheEntry) {
+export class RequestItem extends vscode.TreeItem {
+  constructor(public readonly entry: CacheEntry) {
     super(entry.status, vscode.TreeItemCollapsibleState.None);
     this.description = `${formatDateTime(entry.submitTime)} → ${formatDateTime(
       entry.finishTime
