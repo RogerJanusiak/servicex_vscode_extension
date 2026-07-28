@@ -10,6 +10,7 @@ export interface CacheEntry {
   submitTime?: Date;
   finishTime?: Date;
   files: number;
+  filesCompleted: number;
   filesFailed: number;
   stale: boolean;
   /** Name of the backend the request was actually found on, only set when
@@ -75,14 +76,16 @@ export class RequestItem extends vscode.TreeItem {
     super(entry.status, vscode.TreeItemCollapsibleState.None);
     this.description =
       `${formatDateTime(entry.submitTime)} → ${formatDateTime(entry.finishTime)} · ` +
-      `${entry.files - entry.filesFailed}/${entry.files} ok` +
+      `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}` +
       (entry.backend ? ` · via ${entry.backend}` : '');
     this.tooltip = [
       `Request ID: ${entry.requestId}`,
       `Status: ${entry.status}`,
       `Submitted: ${formatDateTime(entry.submitTime)}`,
       `Finished: ${formatDateTime(entry.finishTime)}`,
-      `Files: ${entry.files}  Failed: ${entry.filesFailed}`,
+      `Files Complete: ${entry.filesCompleted}`,
+      `Files Failed: ${entry.filesFailed}`,
+      `Files Total: ${entry.files}`,
       ...(entry.backend ? [`Backend: ${entry.backend}`] : []),
     ].join('\n');
     if (entry.stale) {
@@ -188,6 +191,7 @@ async function fetchOneEntry(
         submitTime: remote.submitTime,
         finishTime: remote.finishTime,
         files: remote.files,
+        filesCompleted: remote.filesCompleted,
         filesFailed: remote.filesFailed,
         stale: false,
         backend: name,
@@ -214,6 +218,7 @@ async function fetchOneEntry(
     submitTime: local.submit_time ? new Date(local.submit_time) : undefined,
     finishTime: undefined,
     files: 0,
+    filesCompleted: 0,
     filesFailed: 0,
     stale: true,
   };
