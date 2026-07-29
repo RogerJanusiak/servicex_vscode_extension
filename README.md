@@ -29,6 +29,17 @@ npm install
 Then open this folder in VS Code and press `F5` to launch an Extension
 Development Host with the extension loaded.
 
+### Testing
+
+```bash
+npm test
+```
+
+Runs the full test suite inside a real (headless) VS Code instance via
+[`@vscode/test-cli`](https://www.npmjs.com/package/@vscode/test-cli). Also
+runs automatically on every push and pull request via
+[`.github/workflows/test.yml`](.github/workflows/test.yml).
+
 ## License
 
 [BSD 3-Clause](LICENSE)

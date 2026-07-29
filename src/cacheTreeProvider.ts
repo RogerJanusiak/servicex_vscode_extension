@@ -65,7 +65,7 @@ export function computeCleanPlan(entries: CacheEntry[]): CacheEntry[] {
 }
 
 /** A plain informational row with no children - used for empty/error states. */
-class MessageItem extends vscode.TreeItem {
+export class MessageItem extends vscode.TreeItem {
   constructor(message: string, icon?: string) {
     super(message, vscode.TreeItemCollapsibleState.None);
     if (icon) {
@@ -239,7 +239,7 @@ async function fetchOneEntry(
  * by submit time (newest first). Groups themselves are ordered by their most
  * recent submit time. Mirrors core._group_by_title in the Python CLI.
  */
-function groupByTitle(entries: CacheEntry[]): TitleGroupItem[] {
+export function groupByTitle(entries: CacheEntry[]): TitleGroupItem[] {
   const byTitle = new Map<string, CacheEntry[]>();
   for (const e of entries) {
     const bucket = byTitle.get(e.title);
