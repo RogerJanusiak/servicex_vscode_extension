@@ -1,9 +1,9 @@
-# ServiceX VS Code Extension
+# ServiceX Helper
 
 A VS Code extension for managing [ServiceX](https://github.com/ssl-hep/ServiceX_frontend)
 transform caches and jobs.
 
-It adds a "ServiceX" icon to the Activity Bar with a "Cached Transforms" view,
+It adds a "ServiceX Helper" icon to the Activity Bar with a "Cached Transforms" view,
 which lists every transform request in your local ServiceX cache, grouped by
 title and refreshed from the backend.
 

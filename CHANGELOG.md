@@ -1,12 +1,12 @@
 # Change Log
 
-All notable changes to the "ServiceX" extension will be documented in this file.
+All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
 ## [0.1.0] - 2026-07-28
 
 ### Added
 
-- "ServiceX" Activity Bar view container with a "Cached Transforms" panel,
+- "ServiceX Helper" Activity Bar view container with a "Cached Transforms" panel,
   listing every transform request in your local ServiceX cache. Requests are
   grouped by title (newest group first, newest request within a group
   first), with each row's status, submit/finish time, and file counts

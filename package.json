@@ -1,6 +1,6 @@
 {
   "name": "servicex-vscode-extension",
-  "displayName": "ServiceX",
+  "displayName": "ServiceX Helper",
   "description": "Manage ServiceX transform caches and jobs from VS Code",
   "version": "0.1.0",
   "publisher": "RogerJanusiak",
@@ -59,7 +59,7 @@
       "activitybar": [
         {
           "id": "servicex",
-          "title": "ServiceX",
+          "title": "ServiceX Helper",
           "icon": "resources/icon.png"
         }
       ]
@@ -109,7 +109,7 @@
       ]
     },
     "configuration": {
-      "title": "ServiceX",
+      "title": "ServiceX Helper",
       "properties": {
         "servicex.configPath": {
           "type": "string",
