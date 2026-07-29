@@ -53,6 +53,16 @@
         "command": "servicex.copyFileList",
         "title": "ServiceX: Copy File List",
         "icon": "$(files)"
+      },
+      {
+        "command": "servicex.filterByStatus",
+        "title": "ServiceX: Filter by Status",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "servicex.clearStatusFilter",
+        "title": "ServiceX: Clear Status Filter",
+        "icon": "$(filter-filled)"
       }
     ],
     "viewsContainers": {
@@ -77,6 +87,16 @@
         {
           "command": "servicex.refreshCache",
           "when": "view == servicexCacheView",
+          "group": "navigation"
+        },
+        {
+          "command": "servicex.filterByStatus",
+          "when": "view == servicexCacheView",
+          "group": "navigation"
+        },
+        {
+          "command": "servicex.clearStatusFilter",
+          "when": "view == servicexCacheView && servicex.statusFilterActive",
           "group": "navigation"
         }
       ],

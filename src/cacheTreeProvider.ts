@@ -36,7 +36,19 @@ function formatDateTime(value?: Date): string {
 }
 
 export class TitleGroupItem extends vscode.TreeItem {
-  constructor(public readonly title: string, public readonly entries: CacheEntry[]) {
+  /**
+   * @param entries Entries to display as children (and count in the badge) -
+   *   the currently filtered/visible set.
+   * @param allEntries The full, unfiltered set of entries for this title,
+   *   used for operations like "Clean" that must consider cache hygiene
+   *   regardless of what status filter happens to be active. Defaults to
+   *   `entries` when there is no active filter.
+   */
+  constructor(
+    public readonly title: string,
+    public readonly entries: CacheEntry[],
+    public readonly allEntries: CacheEntry[] = entries
+  ) {
     super(title, vscode.TreeItemCollapsibleState.Expanded);
     this.description = `${entries.length} request${entries.length === 1 ? '' : 's'}`;
     this.contextValue = 'servicexTitleGroup';
@@ -106,11 +118,63 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private groups: TitleGroupItem[] = [];
+  private rawEntries: CacheEntry[] = [];
   private loaded = false;
+  private statusFilter?: Set<string>;
 
   refresh(): void {
     this.loaded = false;
     this._onDidChangeTreeData.fire();
+  }
+
+  /** Loads entries if they haven't been fetched yet, without forcing a re-fetch. */
+  async ensureLoaded(): Promise<void> {
+    if (!this.loaded) {
+      await this.getChildren();
+    }
+  }
+
+  /** Distinct statuses among the currently loaded entries, for building a filter picker. */
+  getAvailableStatuses(): string[] {
+    return Array.from(new Set(this.rawEntries.map((e) => e.status))).sort();
+  }
+
+  getStatusFilter(): Set<string> | undefined {
+    return this.statusFilter;
+  }
+
+  /** Restrict the tree to entries whose status is in `statuses`; undefined shows everything. */
+  setStatusFilter(statuses: Set<string> | undefined): void {
+    this.statusFilter = statuses;
+    this.rebuildGroups();
+    this._onDidChangeTreeData.fire();
+  }
+
+  private filteredEntries(): CacheEntry[] {
+    return this.statusFilter ? this.rawEntries.filter((e) => this.statusFilter!.has(e.status)) : this.rawEntries;
+  }
+
+  /**
+   * Rebuilds `this.groups` from the currently filtered entries, but keeps
+   * each TitleGroupItem's `allEntries` pointed at the full unfiltered group
+   * - so consumers like "Clean" (which must sweep stale/cancelled/failed
+   * requests regardless of what's currently visible) don't silently miss
+   * entries hidden by the status filter.
+   */
+  private rebuildGroups(): void {
+    const rawByTitle = new Map<string, CacheEntry[]>();
+    for (const e of this.rawEntries) {
+      const bucket = rawByTitle.get(e.title);
+      if (bucket) {
+        bucket.push(e);
+      } else {
+        rawByTitle.set(e.title, [e]);
+      }
+    }
+
+    this.groups = groupByTitle(this.filteredEntries()).map(
+      (g) => new TitleGroupItem(g.title, g.entries, rawByTitle.get(g.title))
+    );
   }
 
   getTreeItem(element: CacheNode): vscode.TreeItem {
@@ -127,16 +191,26 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
     if (!this.loaded) {
       try {
-        this.groups = groupByTitle(await this.fetchEntries());
+        this.rawEntries = await this.fetchEntries();
+        this.rebuildGroups();
       } catch (e) {
-        this.groups = [];
+        this.rawEntries = [];
         this.loaded = true;
         return [new MessageItem(`Error: ${(e as Error).message}`, 'error')];
       }
       this.loaded = true;
     }
 
-    return this.groups.length ? this.groups : [new MessageItem('No cached transform requests found.')];
+    if (this.groups.length) {
+      return this.groups;
+    }
+    return [
+      new MessageItem(
+        this.statusFilter
+          ? 'No cached requests match the selected status filter.'
+          : 'No cached transform requests found.'
+      ),
+    ];
   }
 
   private async fetchEntries(): Promise<CacheEntry[]> {

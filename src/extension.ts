@@ -11,11 +11,43 @@ function resolveCachePath(): string {
 
 export function activate(context: vscode.ExtensionContext) {
   const cacheTreeProvider = new CacheTreeProvider();
-  context.subscriptions.push(
-    vscode.window.registerTreeDataProvider('servicexCacheView', cacheTreeProvider)
-  );
+  const treeView = vscode.window.createTreeView('servicexCacheView', {
+    treeDataProvider: cacheTreeProvider,
+  });
+  context.subscriptions.push(treeView);
   context.subscriptions.push(
     vscode.commands.registerCommand('servicex.refreshCache', () => cacheTreeProvider.refresh())
+  );
+
+  const applyStatusFilter = (filter: Set<string> | undefined) => {
+    cacheTreeProvider.setStatusFilter(filter);
+    vscode.commands.executeCommand('setContext', 'servicex.statusFilterActive', filter !== undefined);
+    treeView.message = filter ? `Filtered by status: ${Array.from(filter).join(', ')}` : undefined;
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.filterByStatus', async () => {
+      await cacheTreeProvider.ensureLoaded();
+      const statuses = cacheTreeProvider.getAvailableStatuses();
+      if (statuses.length === 0) {
+        vscode.window.showInformationMessage('No cached transform requests to filter yet.');
+        return;
+      }
+      const current = cacheTreeProvider.getStatusFilter();
+      const picks = await vscode.window.showQuickPick(
+        statuses.map((status) => ({ label: status, picked: !current || current.has(status) })),
+        { canPickMany: true, placeHolder: 'Show requests with status...' }
+      );
+      if (!picks) {
+        return;
+      }
+      const selected = new Set(picks.map((p) => p.label));
+      applyStatusFilter(selected.size === statuses.length ? undefined : selected);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.clearStatusFilter', () => applyStatusFilter(undefined))
   );
 
   context.subscriptions.push(
@@ -46,14 +78,19 @@ export function activate(context: vscode.ExtensionContext) {
       if (!item) {
         return;
       }
-      const toDelete = computeCleanPlan(item.entries);
+      const toDelete = computeCleanPlan(item.allEntries);
       if (toDelete.length === 0) {
         vscode.window.showInformationMessage(`Nothing to clean for '${item.title}'.`);
         return;
       }
+      const filterWarning = cacheTreeProvider.getStatusFilter()
+        ? ' A status filter is currently active - Clean will still remove matching requests for ' +
+          "this title even if they aren't shown in the tree right now."
+        : '';
       const confirm = await vscode.window.showWarningMessage(
         `Delete ${toDelete.length} cached request(s) for '${item.title}' ` +
-          `(older completed runs and any cancelled runs), keeping the most recent completed one?`,
+          `(older completed runs and any cancelled runs), keeping the most recent completed one?` +
+          filterWarning,
         { modal: true },
         'Delete'
       );

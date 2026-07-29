@@ -352,3 +352,130 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     assert.strictEqual(fetchCount, 2, 'call after refresh() should re-fetch');
   });
 });
+
+suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
+  const originalLoadConfig = configModule.loadConfig;
+  const originalReadCacheRecords = cacheDbModule.readCacheRecords;
+  const originalServiceXApi = serviceXApiModule.ServiceXApi;
+
+  teardown(() => {
+    (configModule as unknown as { loadConfig: unknown }).loadConfig = originalLoadConfig;
+    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = originalReadCacheRecords;
+    (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = originalServiceXApi;
+  });
+
+  async function makeLoadedProvider(fetchCounter?: { count: number }): Promise<CacheTreeProvider> {
+    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
+      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
+      defaultEndpoint: 'default',
+      cachePath: '/fake/cache',
+      configFile: '/fake/servicex.yaml',
+    });
+    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => {
+      if (fetchCounter) {
+        fetchCounter.count++;
+      }
+      return [
+        { request_id: 'a1', title: 'A', status: 'COMPLETE' },
+        { request_id: 'b1', title: 'B', status: 'FATAL' },
+      ];
+    };
+    installFakeServiceXApi({
+      'https://default.example.org': {
+        a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
+        b1: fakeStatus({ requestId: 'b1', title: 'B', status: 'Fatal' }),
+      },
+    });
+
+    const provider = new CacheTreeProvider();
+    await provider.getChildren();
+    return provider;
+  }
+
+  test('getAvailableStatuses lists distinct statuses from the loaded entries', async () => {
+    const provider = await makeLoadedProvider();
+    assert.deepStrictEqual(provider.getAvailableStatuses(), ['Complete', 'Fatal']);
+  });
+
+  test('setStatusFilter narrows the tree without re-fetching', async () => {
+    const fetchCounter = { count: 0 };
+    const provider = await makeLoadedProvider(fetchCounter);
+
+    provider.setStatusFilter(new Set(['Fatal']));
+    const roots = await provider.getChildren();
+
+    assert.strictEqual(fetchCounter.count, 1, 'filtering should not trigger a re-fetch');
+    assert.strictEqual(roots.length, 1);
+    assert.strictEqual((roots[0] as TitleGroupItem).title, 'B');
+  });
+
+  test('setStatusFilter(undefined) restores every entry', async () => {
+    const provider = await makeLoadedProvider();
+
+    provider.setStatusFilter(new Set(['Fatal']));
+    provider.setStatusFilter(undefined);
+    const roots = await provider.getChildren();
+
+    assert.strictEqual(roots.length, 2);
+    assert.strictEqual(provider.getStatusFilter(), undefined);
+  });
+
+  test('shows a filter-specific empty message when nothing matches', async () => {
+    const provider = await makeLoadedProvider();
+
+    provider.setStatusFilter(new Set(['Canceled']));
+    const roots = await provider.getChildren();
+
+    assert.strictEqual(roots.length, 1);
+    assert.ok(roots[0] instanceof MessageItem);
+    assert.strictEqual(
+      (roots[0] as MessageItem).label,
+      'No cached requests match the selected status filter.'
+    );
+  });
+
+  test('ensureLoaded fetches once but is a no-op once loaded', async () => {
+    const fetchCounter = { count: 0 };
+    const provider = await makeLoadedProvider(fetchCounter);
+
+    await provider.ensureLoaded();
+    await provider.ensureLoaded();
+
+    assert.strictEqual(fetchCounter.count, 1);
+  });
+
+  test('TitleGroupItem.allEntries keeps the full group even when the filter hides some of it', async () => {
+    // a1/a2 share a title so filtering can hide one but not the other.
+    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
+      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
+      defaultEndpoint: 'default',
+      cachePath: '/fake/cache',
+      configFile: '/fake/servicex.yaml',
+    });
+    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
+      { request_id: 'a1', title: 'A', status: 'COMPLETE' },
+      { request_id: 'a2', title: 'A', status: 'CANCELED' },
+    ];
+    installFakeServiceXApi({
+      'https://default.example.org': {
+        a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
+        a2: fakeStatus({ requestId: 'a2', title: 'A', status: 'Canceled' }),
+      },
+    });
+
+    const provider = new CacheTreeProvider();
+    await provider.getChildren();
+
+    provider.setStatusFilter(new Set(['Complete']));
+    const roots = await provider.getChildren();
+    const group = roots[0] as TitleGroupItem;
+
+    assert.strictEqual(group.entries.length, 1, 'only the visible (Complete) entry should show as a child');
+    assert.strictEqual(group.entries[0].requestId, 'a1');
+    assert.deepStrictEqual(
+      group.allEntries.map((e) => e.requestId).sort(),
+      ['a1', 'a2'],
+      'allEntries should still carry the request hidden by the filter, for Clean to act on'
+    );
+  });
+});

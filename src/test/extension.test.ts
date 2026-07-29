@@ -2,6 +2,8 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
+import * as serviceXApiModule from '../serviceXApi';
+import { NotFoundError, TransformStatus } from '../serviceXApi';
 import { RequestItem, TitleGroupItem, CacheEntry } from '../cacheTreeProvider';
 
 const EXTENSION_ID = 'RogerJanusiak.servicex-vscode-extension';
@@ -15,6 +17,37 @@ function makeEntry(overrides: Partial<CacheEntry>): CacheEntry {
     filesCompleted: 1,
     filesFailed: 0,
     stale: false,
+    ...overrides,
+  };
+}
+
+/** Same fake as cacheTreeProvider.test.ts - routes getTransformStatus by endpoint URL. */
+function installFakeServiceXApi(
+  backendData: Record<string, Record<string, TransformStatus | Error>>
+): void {
+  class FakeServiceXApi {
+    constructor(private readonly endpoint: string) {}
+    async getTransformStatus(requestId: string): Promise<TransformStatus> {
+      const result = backendData[this.endpoint]?.[requestId];
+      if (!result) {
+        throw new NotFoundError(`${requestId} not found on ${this.endpoint}`);
+      }
+      if (result instanceof Error) {
+        throw result;
+      }
+      return result;
+    }
+  }
+  (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = FakeServiceXApi;
+}
+
+function fakeStatus(overrides: Partial<TransformStatus>): TransformStatus {
+  return {
+    requestId: 'req',
+    status: 'Complete',
+    files: 1,
+    filesCompleted: 1,
+    filesFailed: 0,
     ...overrides,
   };
 }
@@ -37,6 +70,8 @@ suite('extension.ts - activation', () => {
       'servicex.deleteGroup',
       'servicex.copyRequestId',
       'servicex.copyFileList',
+      'servicex.filterByStatus',
+      'servicex.clearStatusFilter',
     ]) {
       assert.ok(commands.includes(id), `expected command ${id} to be registered`);
     }
@@ -45,20 +80,30 @@ suite('extension.ts - activation', () => {
 
 suite('extension.ts - command handlers', () => {
   const originalLoadConfig = configModule.loadConfig;
+  const originalReadCacheRecords = cacheDbModule.readCacheRecords;
   const originalDeleteCacheRecord = cacheDbModule.deleteCacheRecord;
   const originalDeleteAllForTitle = cacheDbModule.deleteAllForTitle;
+  const originalServiceXApi = serviceXApiModule.ServiceXApi;
   const originalShowWarningMessage = vscode.window.showWarningMessage;
   const originalShowInformationMessage = vscode.window.showInformationMessage;
+  const originalShowQuickPick = vscode.window.showQuickPick;
 
   suiteSetup(activateExtension);
 
-  teardown(() => {
+  teardown(async () => {
     (configModule as unknown as { loadConfig: unknown }).loadConfig = originalLoadConfig;
+    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = originalReadCacheRecords;
     (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = originalDeleteCacheRecord;
     (cacheDbModule as unknown as { deleteAllForTitle: unknown }).deleteAllForTitle = originalDeleteAllForTitle;
+    (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = originalServiceXApi;
     (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = originalShowWarningMessage;
     (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage =
       originalShowInformationMessage;
+    (vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = originalShowQuickPick;
+    // The extension keeps a single shared CacheTreeProvider instance for the
+    // test process's lifetime - clear any filter a test left active so it
+    // doesn't leak into unrelated tests.
+    await vscode.commands.executeCommand('servicex.clearStatusFilter');
   });
 
   test('servicex.deleteFromCache does nothing when the user dismisses the confirmation', async () => {
@@ -149,6 +194,97 @@ suite('extension.ts - command handlers', () => {
     await vscode.commands.executeCommand('servicex.cleanGroup', group);
 
     assert.deepStrictEqual(deletedIds.sort(), ['cancelled', 'older']);
+  });
+
+  test('servicex.cleanGroup sweeps entries hidden by the status filter, not just the visible ones', async () => {
+    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => 'Delete';
+    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
+      endpoints: [],
+      cachePath: '/fake/cache',
+      configFile: '/fake/servicex.yaml',
+    });
+    const deletedIds: string[] = [];
+    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = (
+      _cachePath: string,
+      requestId: string
+    ) => {
+      deletedIds.push(requestId);
+      return true;
+    };
+    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
+      Promise.resolve(undefined);
+
+    const newest = makeEntry({ requestId: 'newest', status: 'Complete', submitTime: new Date(500) });
+    const older = makeEntry({ requestId: 'older', status: 'Complete', submitTime: new Date(100) });
+    const cancelled = makeEntry({ requestId: 'cancelled', status: 'Canceled', submitTime: new Date(300) });
+    // Simulate a status filter set to "Complete" only: the group's visible
+    // `entries` excludes the cancelled request, but `allEntries` (what a
+    // real filtered CacheTreeProvider would attach) still has everything.
+    const group = new TitleGroupItem('MyTitle', [newest, older], [newest, older, cancelled]);
+
+    await vscode.commands.executeCommand('servicex.cleanGroup', group);
+
+    assert.deepStrictEqual(
+      deletedIds.sort(),
+      ['cancelled', 'older'],
+      'Clean should sweep the cancelled request even though it was hidden by the active filter'
+    );
+  });
+
+  test('servicex.cleanGroup warns that hidden requests will still be cleaned when a status filter is active', async () => {
+    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
+      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
+      defaultEndpoint: 'default',
+      cachePath: '/fake/cache',
+      configFile: '/fake/servicex.yaml',
+    });
+    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
+      { request_id: 'a1', title: 'A', status: 'COMPLETE' },
+    ];
+    installFakeServiceXApi({
+      'https://default.example.org': {
+        a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
+      },
+    });
+    // Pick zero of the available statuses - a non-empty, non-"select all"
+    // choice, so the filter ends up active (not cleared).
+    (vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = async () => [];
+    await vscode.commands.executeCommand('servicex.filterByStatus');
+
+    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
+    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
+      Promise.resolve(undefined);
+    let capturedMessage: string | undefined;
+    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async (msg: string) => {
+      capturedMessage = msg;
+      return 'Delete';
+    };
+
+    const cancelled = makeEntry({ requestId: 'cancelled', status: 'Canceled' });
+    const group = new TitleGroupItem('MyTitle', [], [cancelled]);
+    await vscode.commands.executeCommand('servicex.cleanGroup', group);
+
+    assert.ok(
+      capturedMessage?.includes('A status filter is currently active'),
+      `expected the filter warning in: ${capturedMessage}`
+    );
+  });
+
+  test('servicex.cleanGroup does not mention the filter when none is active', async () => {
+    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
+      Promise.resolve(undefined);
+    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
+    let capturedMessage: string | undefined;
+    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async (msg: string) => {
+      capturedMessage = msg;
+      return 'Delete';
+    };
+
+    const cancelled = makeEntry({ requestId: 'cancelled', status: 'Canceled' });
+    const group = new TitleGroupItem('MyTitle', [cancelled]);
+    await vscode.commands.executeCommand('servicex.cleanGroup', group);
+
+    assert.ok(!capturedMessage?.includes('status filter'), `did not expect a filter warning in: ${capturedMessage}`);
   });
 
   test('servicex.deleteGroup deletes every request in the group when confirmed', async () => {
