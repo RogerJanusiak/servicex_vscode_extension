@@ -70,8 +70,11 @@ suite('extension.ts - activation', () => {
       'servicex.deleteGroup',
       'servicex.copyRequestId',
       'servicex.copyFileList',
-      'servicex.filterByStatus',
-      'servicex.clearStatusFilter',
+      'servicex.openFilterMenu',
+      'servicex.clearAllFilters',
+      'servicex.openSortMenu',
+      'servicex.groupByTitle',
+      'servicex.ungroup',
     ]) {
       assert.ok(commands.includes(id), `expected command ${id} to be registered`);
     }
@@ -103,7 +106,7 @@ suite('extension.ts - command handlers', () => {
     // The extension keeps a single shared CacheTreeProvider instance for the
     // test process's lifetime - clear any filter a test left active so it
     // doesn't leak into unrelated tests.
-    await vscode.commands.executeCommand('servicex.clearStatusFilter');
+    await vscode.commands.executeCommand('servicex.clearAllFilters');
   });
 
   test('servicex.deleteFromCache does nothing when the user dismisses the confirmation', async () => {
@@ -231,7 +234,7 @@ suite('extension.ts - command handlers', () => {
     );
   });
 
-  test('servicex.cleanGroup warns that hidden requests will still be cleaned when a status filter is active', async () => {
+  test('servicex.cleanGroup warns that hidden requests will still be cleaned when a filter is active', async () => {
     (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
       endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
       defaultEndpoint: 'default',
@@ -246,10 +249,18 @@ suite('extension.ts - command handlers', () => {
         a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
       },
     });
-    // Pick zero of the available statuses - a non-empty, non-"select all"
+    // Drive the Filter... hub: first pick opens the "Status" sub-menu, then
+    // pick zero of the available statuses - a non-empty, non-"select all"
     // choice, so the filter ends up active (not cleared).
-    (vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = async () => [];
-    await vscode.commands.executeCommand('servicex.filterByStatus');
+    let quickPickCall = 0;
+    (vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = async (items: unknown) => {
+      quickPickCall++;
+      if (quickPickCall === 1) {
+        return (items as { action: string }[]).find((i) => i.action === 'status');
+      }
+      return [];
+    };
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
 
     (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
     (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
@@ -265,12 +276,12 @@ suite('extension.ts - command handlers', () => {
     await vscode.commands.executeCommand('servicex.cleanGroup', group);
 
     assert.ok(
-      capturedMessage?.includes('A status filter is currently active'),
+      capturedMessage?.includes('A filter is currently active'),
       `expected the filter warning in: ${capturedMessage}`
     );
   });
 
-  test('servicex.cleanGroup does not mention the filter when none is active', async () => {
+  test('servicex.cleanGroup does not mention a filter when none is active', async () => {
     (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
       Promise.resolve(undefined);
     (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
@@ -284,7 +295,10 @@ suite('extension.ts - command handlers', () => {
     const group = new TitleGroupItem('MyTitle', [cancelled]);
     await vscode.commands.executeCommand('servicex.cleanGroup', group);
 
-    assert.ok(!capturedMessage?.includes('status filter'), `did not expect a filter warning in: ${capturedMessage}`);
+    assert.ok(
+      !capturedMessage?.includes('filter is currently active'),
+      `did not expect a filter warning in: ${capturedMessage}`
+    );
   });
 
   test('servicex.deleteGroup deletes every request in the group when confirmed', async () => {

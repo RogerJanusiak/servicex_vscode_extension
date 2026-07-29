@@ -13,12 +13,71 @@ export interface CacheEntry {
   filesCompleted: number;
   filesFailed: number;
   stale: boolean;
-  /** Name of the backend the request was actually found on, only set when
-   *  that isn't the default/selected backend (i.e. a fallback was used). */
+  /** Name of the backend the request was actually found on; undefined only
+   *  when it wasn't found on any configured backend. */
   backend?: string;
   /** Locally downloaded file paths for this request, from the local cache
    *  record - undefined/empty if nothing has been downloaded yet. */
   fileList?: string[];
+}
+
+export type SortBy = 'title' | 'date' | 'files';
+export type SortDirection = 'asc' | 'desc';
+export type FailureFilter = 'all' | 'withFailures' | 'withoutFailures';
+
+export interface EntryFilters {
+  status?: Set<string>;
+  backend?: Set<string>;
+  failures?: FailureFilter;
+  dateFrom?: Date;
+  dateTo?: Date;
+}
+
+/** Applies every active filter dimension to a flat list of entries. */
+export function filterEntries(entries: CacheEntry[], filters: EntryFilters): CacheEntry[] {
+  return entries.filter((e) => {
+    if (filters.status && !filters.status.has(e.status)) {
+      return false;
+    }
+    if (filters.backend && (!e.backend || !filters.backend.has(e.backend))) {
+      return false;
+    }
+    if (filters.failures === 'withFailures' && e.filesFailed <= 0) {
+      return false;
+    }
+    if (filters.failures === 'withoutFailures' && e.filesFailed > 0) {
+      return false;
+    }
+    if (filters.dateFrom || filters.dateTo) {
+      if (!e.submitTime) {
+        return false;
+      }
+      if (filters.dateFrom && e.submitTime < filters.dateFrom) {
+        return false;
+      }
+      if (filters.dateTo && e.submitTime > filters.dateTo) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function compareEntries(a: CacheEntry, b: CacheEntry, sortBy: SortBy): number {
+  if (sortBy === 'title') {
+    return a.title.localeCompare(b.title);
+  }
+  if (sortBy === 'files') {
+    return a.files - b.files;
+  }
+  return (a.submitTime?.getTime() ?? 0) - (b.submitTime?.getTime() ?? 0);
+}
+
+/** Sorts a flat list of entries by title (A→Z/Z→A), submit date, or total file count. */
+export function sortEntries(entries: CacheEntry[], sortBy: SortBy, direction: SortDirection): CacheEntry[] {
+  const sorted = [...entries];
+  sorted.sort((a, b) => (direction === 'asc' ? compareEntries(a, b, sortBy) : compareEntries(b, a, sortBy)));
+  return sorted;
 }
 
 function formatDateTime(value?: Date): string {
@@ -41,8 +100,8 @@ export class TitleGroupItem extends vscode.TreeItem {
    *   the currently filtered/visible set.
    * @param allEntries The full, unfiltered set of entries for this title,
    *   used for operations like "Clean" that must consider cache hygiene
-   *   regardless of what status filter happens to be active. Defaults to
-   *   `entries` when there is no active filter.
+   *   regardless of what filters happen to be active. Defaults to `entries`
+   *   when there is no active filter.
    */
   constructor(
     public readonly title: string,
@@ -87,13 +146,19 @@ export class MessageItem extends vscode.TreeItem {
 }
 
 export class RequestItem extends vscode.TreeItem {
-  constructor(public readonly entry: CacheEntry) {
+  constructor(
+    public readonly entry: CacheEntry,
+    options?: { showTitle?: boolean; showBackend?: boolean }
+  ) {
     super(entry.status, vscode.TreeItemCollapsibleState.None);
+    const showBackend = (options?.showBackend ?? true) && !!entry.backend;
     this.description =
+      (options?.showTitle ? `${entry.title} · ` : '') +
       `${formatDateTime(entry.submitTime)} → ${formatDateTime(entry.finishTime)} · ` +
       `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}` +
-      (entry.backend ? ` · via ${entry.backend}` : '');
+      (showBackend ? ` · via ${entry.backend}` : '');
     this.tooltip = [
+      `Title: ${entry.title}`,
       `Request ID: ${entry.requestId}`,
       `Status: ${entry.status}`,
       `Submitted: ${formatDateTime(entry.submitTime)}`,
@@ -117,10 +182,21 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private groups: TitleGroupItem[] = [];
+  private rootNodes: CacheNode[] = [];
   private rawEntries: CacheEntry[] = [];
   private loaded = false;
+
   private statusFilter?: Set<string>;
+  private backendFilter?: Set<string>;
+  private failureFilter: FailureFilter = 'all';
+  private dateFilter?: { from?: Date; to?: Date };
+
+  private sortBy: SortBy = 'date';
+  private sortDirection: SortDirection = 'desc';
+  private groupingEnabled = true;
+
+  /** Only show "via <backend>" on rows when more than one backend is actually in play. */
+  private showBackendTag = false;
 
   refresh(): void {
     this.loaded = false;
@@ -139,42 +215,127 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     return Array.from(new Set(this.rawEntries.map((e) => e.status))).sort();
   }
 
+  /** Distinct backend names among the currently loaded entries, for building a filter picker. */
+  getAvailableBackends(): string[] {
+    return Array.from(new Set(this.rawEntries.map((e) => e.backend).filter((b): b is string => !!b))).sort();
+  }
+
   getStatusFilter(): Set<string> | undefined {
     return this.statusFilter;
   }
 
-  /** Restrict the tree to entries whose status is in `statuses`; undefined shows everything. */
+  /** Restrict the tree to entries whose status is in `statuses`; undefined shows every status. */
   setStatusFilter(statuses: Set<string> | undefined): void {
     this.statusFilter = statuses;
-    this.rebuildGroups();
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+  }
+
+  getBackendFilter(): Set<string> | undefined {
+    return this.backendFilter;
+  }
+
+  /** Restrict the tree to entries found on one of `backends`; undefined shows every backend. */
+  setBackendFilter(backends: Set<string> | undefined): void {
+    this.backendFilter = backends;
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+  }
+
+  getFailureFilter(): FailureFilter {
+    return this.failureFilter;
+  }
+
+  /** Restrict the tree to entries with/without failed files, or show both. */
+  setFailureFilter(filter: FailureFilter): void {
+    this.failureFilter = filter;
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+  }
+
+  getDateFilter(): { from?: Date; to?: Date } | undefined {
+    return this.dateFilter;
+  }
+
+  /** Restrict the tree to entries submitted within [from, to] (either bound optional); undefined clears it. */
+  setDateFilter(range: { from?: Date; to?: Date } | undefined): void {
+    this.dateFilter = range && (range.from || range.to) ? range : undefined;
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+  }
+
+  hasActiveFilter(): boolean {
+    return !!this.statusFilter || !!this.backendFilter || this.failureFilter !== 'all' || !!this.dateFilter;
+  }
+
+  clearAllFilters(): void {
+    this.statusFilter = undefined;
+    this.backendFilter = undefined;
+    this.failureFilter = 'all';
+    this.dateFilter = undefined;
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+  }
+
+  getSort(): { sortBy: SortBy; direction: SortDirection } {
+    return { sortBy: this.sortBy, direction: this.sortDirection };
+  }
+
+  setSort(sortBy: SortBy, direction: SortDirection): void {
+    this.sortBy = sortBy;
+    this.sortDirection = direction;
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+  }
+
+  isGroupingEnabled(): boolean {
+    return this.groupingEnabled;
+  }
+
+  setGroupingEnabled(enabled: boolean): void {
+    this.groupingEnabled = enabled;
+    this.rebuildTree();
     this._onDidChangeTreeData.fire();
   }
 
   private filteredEntries(): CacheEntry[] {
-    return this.statusFilter ? this.rawEntries.filter((e) => this.statusFilter!.has(e.status)) : this.rawEntries;
+    return filterEntries(this.rawEntries, {
+      status: this.statusFilter,
+      backend: this.backendFilter,
+      failures: this.failureFilter,
+      dateFrom: this.dateFilter?.from,
+      dateTo: this.dateFilter?.to,
+    });
   }
 
   /**
-   * Rebuilds `this.groups` from the currently filtered entries, but keeps
-   * each TitleGroupItem's `allEntries` pointed at the full unfiltered group
-   * - so consumers like "Clean" (which must sweep stale/cancelled/failed
-   * requests regardless of what's currently visible) don't silently miss
-   * entries hidden by the status filter.
+   * Rebuilds the visible root nodes from the currently filtered/sorted
+   * entries. When grouped, each TitleGroupItem's `allEntries` is still the
+   * full unfiltered group - so "Clean" keeps sweeping stale/cancelled/failed
+   * requests even when a filter is hiding them from view.
    */
-  private rebuildGroups(): void {
-    const rawByTitle = new Map<string, CacheEntry[]>();
-    for (const e of this.rawEntries) {
-      const bucket = rawByTitle.get(e.title);
-      if (bucket) {
-        bucket.push(e);
-      } else {
-        rawByTitle.set(e.title, [e]);
-      }
-    }
+  private rebuildTree(): void {
+    this.showBackendTag = this.getAvailableBackends().length > 1;
+    const filtered = this.filteredEntries();
 
-    this.groups = groupByTitle(this.filteredEntries()).map(
-      (g) => new TitleGroupItem(g.title, g.entries, rawByTitle.get(g.title))
-    );
+    if (this.groupingEnabled) {
+      const rawByTitle = new Map<string, CacheEntry[]>();
+      for (const e of this.rawEntries) {
+        const bucket = rawByTitle.get(e.title);
+        if (bucket) {
+          bucket.push(e);
+        } else {
+          rawByTitle.set(e.title, [e]);
+        }
+      }
+      this.rootNodes = groupByTitle(filtered, this.sortBy, this.sortDirection).map(
+        (g) => new TitleGroupItem(g.title, g.entries, rawByTitle.get(g.title))
+      );
+    } else {
+      this.rootNodes = sortEntries(filtered, this.sortBy, this.sortDirection).map(
+        (e) => new RequestItem(e, { showTitle: true, showBackend: this.showBackendTag })
+      );
+    }
   }
 
   getTreeItem(element: CacheNode): vscode.TreeItem {
@@ -183,7 +344,7 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
   async getChildren(element?: CacheNode): Promise<CacheNode[]> {
     if (element instanceof TitleGroupItem) {
-      return element.entries.map((e) => new RequestItem(e));
+      return element.entries.map((e) => new RequestItem(e, { showBackend: this.showBackendTag }));
     }
     if (element) {
       return [];
@@ -192,7 +353,7 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     if (!this.loaded) {
       try {
         this.rawEntries = await this.fetchEntries();
-        this.rebuildGroups();
+        this.rebuildTree();
       } catch (e) {
         this.rawEntries = [];
         this.loaded = true;
@@ -201,13 +362,13 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       this.loaded = true;
     }
 
-    if (this.groups.length) {
-      return this.groups;
+    if (this.rootNodes.length) {
+      return this.rootNodes;
     }
     return [
       new MessageItem(
-        this.statusFilter
-          ? 'No cached requests match the selected status filter.'
+        this.hasActiveFilter()
+          ? 'No cached requests match the current filters.'
           : 'No cached transform requests found.'
       ),
     ];
@@ -218,7 +379,6 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
     const endpoints = orderedEndpoints(config, settings.get<string>('backend') || undefined);
-    const defaultBackendName = endpoints[0].name;
     const namedApis = endpoints.map((e) => ({
       name: e.name,
       api: new ServiceXApi(e.endpoint, e.token),
@@ -232,23 +392,9 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       }
     }
 
-    const entries = await Promise.all(
-      Array.from(localByRequestId.entries()).map(([requestId, local]) =>
-        fetchOneEntry(namedApis, requestId, local)
-      )
+    return Promise.all(
+      Array.from(localByRequestId.entries()).map(([requestId, local]) => fetchOneEntry(namedApis, requestId, local))
     );
-
-    // Only show which backend each request came from if at least one of
-    // them actually needed a fallback - otherwise it's just noise, since
-    // every row would say the same (default) backend.
-    const anyNonDefault = entries.some((e) => e.backend && e.backend !== defaultBackendName);
-    if (!anyNonDefault) {
-      for (const e of entries) {
-        e.backend = undefined;
-      }
-    }
-
-    return entries;
   }
 }
 
@@ -309,11 +455,17 @@ async function fetchOneEntry(
 }
 
 /**
- * Group entries with the same title together, then sort within each group
- * by submit time (newest first). Groups themselves are ordered by their most
- * recent submit time. Mirrors core._group_by_title in the Python CLI.
+ * Group entries with the same title together (entries within a group are
+ * always ordered newest-first). Groups themselves are ordered by title, by
+ * their most recent submit time, or by the most recent entry's total file
+ * count, per `sortBy`/`direction`. Mirrors core._group_by_title in the Python
+ * CLI when using the defaults.
  */
-export function groupByTitle(entries: CacheEntry[]): TitleGroupItem[] {
+export function groupByTitle(
+  entries: CacheEntry[],
+  sortBy: SortBy = 'date',
+  direction: SortDirection = 'desc'
+): TitleGroupItem[] {
   const byTitle = new Map<string, CacheEntry[]>();
   for (const e of entries) {
     const bucket = byTitle.get(e.title);
@@ -329,9 +481,10 @@ export function groupByTitle(entries: CacheEntry[]): TitleGroupItem[] {
     return { title, groupEntries };
   });
 
-  groups.sort(
-    (a, b) => (b.groupEntries[0].submitTime?.getTime() ?? 0) - (a.groupEntries[0].submitTime?.getTime() ?? 0)
-  );
+  groups.sort((a, b) => {
+    const cmp = compareEntries(a.groupEntries[0], b.groupEntries[0], sortBy);
+    return direction === 'asc' ? cmp : -cmp;
+  });
 
   return groups.map((g) => new TitleGroupItem(g.title, g.groupEntries));
 }

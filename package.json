@@ -55,14 +55,28 @@
         "icon": "$(files)"
       },
       {
-        "command": "servicex.filterByStatus",
-        "title": "ServiceX: Filter by Status",
+        "command": "servicex.openFilterMenu",
+        "title": "ServiceX: Filter...",
         "icon": "$(filter)"
       },
       {
-        "command": "servicex.clearStatusFilter",
-        "title": "ServiceX: Clear Status Filter",
-        "icon": "$(filter-filled)"
+        "command": "servicex.clearAllFilters",
+        "title": "ServiceX: Clear All Filters"
+      },
+      {
+        "command": "servicex.openSortMenu",
+        "title": "ServiceX: Sort...",
+        "icon": "$(sort-precedence)"
+      },
+      {
+        "command": "servicex.groupByTitle",
+        "title": "ServiceX: Group by Title",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "servicex.ungroup",
+        "title": "ServiceX: Ungroup",
+        "icon": "$(list-flat)"
       }
     ],
     "viewsContainers": {
@@ -85,19 +99,34 @@
     "menus": {
       "view/title": [
         {
+          "command": "servicex.openFilterMenu",
+          "when": "view == servicexCacheView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "servicex.openSortMenu",
+          "when": "view == servicexCacheView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "servicex.groupByTitle",
+          "when": "view == servicexCacheView && !servicex.groupingEnabled",
+          "group": "navigation@3"
+        },
+        {
+          "command": "servicex.ungroup",
+          "when": "view == servicexCacheView && servicex.groupingEnabled",
+          "group": "navigation@3"
+        },
+        {
           "command": "servicex.refreshCache",
           "when": "view == servicexCacheView",
-          "group": "navigation"
+          "group": "navigation@4"
         },
         {
-          "command": "servicex.filterByStatus",
+          "command": "servicex.clearAllFilters",
           "when": "view == servicexCacheView",
-          "group": "navigation"
-        },
-        {
-          "command": "servicex.clearStatusFilter",
-          "when": "view == servicexCacheView && servicex.statusFilterActive",
-          "group": "navigation"
+          "group": "1_filter"
         }
       ],
       "view/item/context": [
