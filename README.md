@@ -11,8 +11,14 @@ Hovering over a row gives you:
 - On a single request: **Delete from Cache** - removes its downloaded files
   and cache record.
 - On a title group: **Clean Old Requests** - keeps only the most recently
-  submitted request under that title and deletes the rest, or **Delete
-  Entire Group** - removes every locally cached request under that title.
+  submitted completed request under that title, deleting older completed
+  runs plus any cancelled or failed ones, or **Delete Entire Group** -
+  removes every locally cached request under that title.
+
+Right-clicking a single request also gives you:
+- **Copy Request ID** - copies the request ID to the clipboard.
+- **Copy File List** - copies the paths of that request's downloaded files
+  (one per line) to the clipboard.
 
 ## Development
 

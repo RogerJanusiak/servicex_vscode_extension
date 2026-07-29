@@ -73,6 +73,33 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.copyRequestId', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      await vscode.env.clipboard.writeText(item.entry.requestId);
+      vscode.window.setStatusBarMessage(`Copied request ID: ${item.entry.requestId}`, 3000);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.copyFileList', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      const fileList = item.entry.fileList ?? [];
+      if (fileList.length === 0) {
+        vscode.window.showInformationMessage(
+          `No downloaded files to copy for ${item.entry.requestId}.`
+        );
+        return;
+      }
+      await vscode.env.clipboard.writeText(fileList.join('\n'));
+      vscode.window.setStatusBarMessage(`Copied ${fileList.length} file path(s) to clipboard`, 3000);
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('servicex.deleteGroup', async (item: TitleGroupItem) => {
       if (!item) {
         return;

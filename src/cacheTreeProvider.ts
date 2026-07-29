@@ -16,6 +16,9 @@ export interface CacheEntry {
   /** Name of the backend the request was actually found on, only set when
    *  that isn't the default/selected backend (i.e. a fallback was used). */
   backend?: string;
+  /** Locally downloaded file paths for this request, from the local cache
+   *  record - undefined/empty if nothing has been downloaded yet. */
+  fileList?: string[];
 }
 
 function formatDateTime(value?: Date): string {
@@ -87,6 +90,7 @@ export class RequestItem extends vscode.TreeItem {
       `Files Failed: ${entry.filesFailed}`,
       `Files Total: ${entry.files}`,
       ...(entry.backend ? [`Backend: ${entry.backend}`] : []),
+      ...(entry.fileList?.length ? [`Downloaded files: ${entry.fileList.length}`] : []),
     ].join('\n');
     if (entry.stale) {
       this.iconPath = new vscode.ThemeIcon('warning');
@@ -174,6 +178,10 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   }
 }
 
+function localFileList(local: CacheDbRecord): string[] | undefined {
+  return Array.isArray(local.file_list) ? (local.file_list as string[]) : undefined;
+}
+
 async function fetchOneEntry(
   apis: { name: string; api: ServiceXApi }[],
   requestId: string,
@@ -195,6 +203,7 @@ async function fetchOneEntry(
         filesFailed: remote.filesFailed,
         stale: false,
         backend: name,
+        fileList: localFileList(local),
       };
     } catch (e) {
       lastError = e;
@@ -221,6 +230,7 @@ async function fetchOneEntry(
     filesCompleted: 0,
     filesFailed: 0,
     stale: true,
+    fileList: localFileList(local),
   };
 }
 

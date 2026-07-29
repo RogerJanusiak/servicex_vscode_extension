@@ -43,6 +43,16 @@
         "command": "servicex.deleteGroup",
         "title": "ServiceX: Delete Entire Group",
         "icon": "$(trash)"
+      },
+      {
+        "command": "servicex.copyRequestId",
+        "title": "ServiceX: Copy Request ID",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "servicex.copyFileList",
+        "title": "ServiceX: Copy File List",
+        "icon": "$(files)"
       }
     ],
     "viewsContainers": {
@@ -75,6 +85,16 @@
           "command": "servicex.deleteFromCache",
           "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
           "group": "inline"
+        },
+        {
+          "command": "servicex.copyRequestId",
+          "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "servicex.copyFileList",
+          "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
+          "group": "1_copy@2"
         },
         {
           "command": "servicex.cleanGroup",
