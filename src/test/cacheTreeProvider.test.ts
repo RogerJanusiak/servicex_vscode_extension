@@ -1,7 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import {
-  CacheEntry,
   CacheTreeProvider,
   MessageItem,
   RequestItem,
@@ -12,22 +11,15 @@ import {
   sortEntries,
 } from '../cacheTreeProvider';
 import * as configModule from '../config';
-import * as cacheDbModule from '../cacheDb';
-import * as serviceXApiModule from '../serviceXApi';
-import { NotFoundError, TransformStatus } from '../serviceXApi';
-
-function makeEntry(overrides: Partial<CacheEntry>): CacheEntry {
-  return {
-    requestId: 'req',
-    title: 'Title',
-    status: 'Complete',
-    files: 1,
-    filesCompleted: 1,
-    filesFailed: 0,
-    stale: false,
-    ...overrides,
-  };
-}
+import {
+  stub,
+  restoreStubs,
+  makeEntry,
+  fakeStatus,
+  stubConfig,
+  stubCacheRecords,
+  stubServiceXApi,
+} from './testUtils';
 
 suite('cacheTreeProvider.ts - computeCleanPlan', () => {
   test('keeps the newest Complete request, removes older Complete ones', () => {
@@ -229,7 +221,7 @@ suite('cacheTreeProvider.ts - sortEntries', () => {
 
 suite('cacheTreeProvider.ts - TreeItem rendering', () => {
   test('TitleGroupItem shows a request count and the right contextValue', () => {
-    const item = new TitleGroupItem('MyTitle', [makeEntry({}), makeEntry({})]);
+    const item = new TitleGroupItem('MyTitle', [makeEntry(), makeEntry()]);
 
     assert.strictEqual(item.label, 'MyTitle');
     assert.strictEqual(item.description, '2 requests');
@@ -238,7 +230,7 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
   });
 
   test('TitleGroupItem uses singular wording for exactly one request', () => {
-    const item = new TitleGroupItem('MyTitle', [makeEntry({})]);
+    const item = new TitleGroupItem('MyTitle', [makeEntry()]);
     assert.strictEqual(item.description, '1 request');
   });
 
@@ -291,54 +283,13 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
   });
 });
 
-/** Fakes just enough of ServiceXApi to drive CacheTreeProvider.getChildren()
- *  end-to-end without any real network or filesystem access. Routes by the
- *  endpoint URL that CacheTreeProvider constructed it with. */
-function installFakeServiceXApi(
-  backendData: Record<string, Record<string, TransformStatus | Error>>
-): void {
-  class FakeServiceXApi {
-    constructor(private readonly endpoint: string) {}
-    async getTransformStatus(requestId: string): Promise<TransformStatus> {
-      const result = backendData[this.endpoint]?.[requestId];
-      if (!result) {
-        throw new NotFoundError(`${requestId} not found on ${this.endpoint}`);
-      }
-      if (result instanceof Error) {
-        throw result;
-      }
-      return result;
-    }
-  }
-  (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = FakeServiceXApi;
-}
-
-function fakeStatus(overrides: Partial<TransformStatus>): TransformStatus {
-  return {
-    requestId: 'req',
-    status: 'Complete',
-    files: 1,
-    filesCompleted: 1,
-    filesFailed: 0,
-    ...overrides,
-  };
-}
-
 suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () => {
-  const originalLoadConfig = configModule.loadConfig;
-  const originalReadCacheRecords = cacheDbModule.readCacheRecords;
-  const originalServiceXApi = serviceXApiModule.ServiceXApi;
-
-  teardown(() => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = originalLoadConfig;
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = originalReadCacheRecords;
-    (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = originalServiceXApi;
-  });
+  teardown(restoreStubs);
 
   test('shows a friendly message when the config file cannot be found', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => {
+    stub(configModule, 'loadConfig', () => {
       throw new Error("Can't find a .servicex or servicex.yaml config file");
-    };
+    });
 
     const provider = new CacheTreeProvider();
     const roots = await provider.getChildren();
@@ -349,13 +300,8 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
   });
 
   test('shows a friendly message when the local cache is empty', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [];
+    stubConfig();
+    stubCacheRecords([]);
 
     const provider = new CacheTreeProvider();
     const roots = await provider.getChildren();
@@ -366,20 +312,15 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
   });
 
   test('groups fetched entries by title and expands correctly', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
+    stubConfig();
+    stubCacheRecords([
       { request_id: 'a1', title: 'A', status: 'COMPLETE' },
       { request_id: 'b1', title: 'B', status: 'COMPLETE' },
-    ];
-    installFakeServiceXApi({
+    ]);
+    stubServiceXApi({
       'https://default.example.org': {
-        a1: fakeStatus({ requestId: 'a1', title: 'A', submitTime: new Date(100) } as any),
-        b1: fakeStatus({ requestId: 'b1', title: 'B', submitTime: new Date(200) } as any),
+        a1: fakeStatus({ requestId: 'a1', title: 'A', submitTime: new Date(100) }),
+        b1: fakeStatus({ requestId: 'b1', title: 'B', submitTime: new Date(200) }),
       },
     });
 
@@ -398,20 +339,15 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
   });
 
   test('falls back to a secondary backend and tags every entry once any fallback happens', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [
-        { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
-        { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
-      ],
-      defaultEndpoint: 'primary',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
+    stubConfig([
+      { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
+      { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
+    ]);
+    stubCacheRecords([
       { request_id: 'on-primary', title: 'OnPrimary', status: 'COMPLETE' },
       { request_id: 'on-secondary', title: 'OnSecondary', status: 'COMPLETE' },
-    ];
-    installFakeServiceXApi({
+    ]);
+    stubServiceXApi({
       'https://primary.example.org': {
         'on-primary': fakeStatus({ requestId: 'on-primary', title: 'OnPrimary' }),
         // 'on-secondary' is absent here -> NotFoundError -> falls through.
@@ -436,19 +372,12 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
   });
 
   test('keeps entry.backend populated (for filtering) but hides the "via" tag when only one backend is in play', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [
-        { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
-        { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
-      ],
-      defaultEndpoint: 'primary',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
-      { request_id: 'a1', title: 'A', status: 'COMPLETE' },
-    ];
-    installFakeServiceXApi({
+    stubConfig([
+      { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
+      { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
+    ]);
+    stubCacheRecords([{ request_id: 'a1', title: 'A', status: 'COMPLETE' }]);
+    stubServiceXApi({
       'https://primary.example.org': {
         a1: fakeStatus({ requestId: 'a1', title: 'A' }),
       },
@@ -459,7 +388,7 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     const roots = await provider.getChildren();
     const entries = (await provider.getChildren(roots[0])) as RequestItem[];
 
-    // The actual backend is always tracked now (so it can be filtered on)...
+    // The actual backend is always tracked (so it can be filtered on)...
     assert.strictEqual(entries[0].entry.backend, 'primary');
     // ...but since every entry is on the same single backend, the rendered
     // row shouldn't bother calling it out - that'd just be noise.
@@ -467,16 +396,9 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
   });
 
   test('marks a request not found on any backend as stale with a clear status', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
-      { request_id: 'missing', title: 'Ghost', status: 'COMPLETE' },
-    ];
-    installFakeServiceXApi({ 'https://default.example.org': {} });
+    stubConfig();
+    stubCacheRecords([{ request_id: 'missing', title: 'Ghost', status: 'COMPLETE' }]);
+    stubServiceXApi({ 'https://default.example.org': {} });
 
     const provider = new CacheTreeProvider();
     const roots = await provider.getChildren();
@@ -486,18 +408,39 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     assert.strictEqual(entries[0].entry.status, 'Not found on any backend');
   });
 
+  test('surfaces a non-NotFound backend error directly instead of trying other backends', async () => {
+    stubConfig([
+      { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
+      { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
+    ]);
+    stubCacheRecords([{ request_id: 'a1', title: 'A', status: 'COMPLETE' }]);
+    stubServiceXApi({
+      'https://primary.example.org': {
+        a1: new Error('ServiceX WebAPI error 500'),
+      },
+      // The request also exists on the secondary - but a non-NotFound
+      // failure (auth, network, server error) must surface directly, not
+      // silently fall through to another backend.
+      'https://secondary.example.org': {
+        a1: fakeStatus({ requestId: 'a1', title: 'A' }),
+      },
+    });
+
+    const provider = new CacheTreeProvider();
+    const roots = await provider.getChildren();
+    const entries = (await provider.getChildren(roots[0])) as RequestItem[];
+
+    assert.strictEqual(entries[0].entry.stale, true);
+    assert.strictEqual(entries[0].entry.status, 'Error: ServiceX WebAPI error 500');
+  });
+
   test('refresh() forces the next getChildren() call to re-fetch', async () => {
     let fetchCount = 0;
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => {
+    stubConfig();
+    stubCacheRecords(() => {
       fetchCount++;
       return [];
-    };
+    });
 
     const provider = new CacheTreeProvider();
     await provider.getChildren();
@@ -511,24 +454,11 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
 });
 
 suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
-  const originalLoadConfig = configModule.loadConfig;
-  const originalReadCacheRecords = cacheDbModule.readCacheRecords;
-  const originalServiceXApi = serviceXApiModule.ServiceXApi;
-
-  teardown(() => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = originalLoadConfig;
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = originalReadCacheRecords;
-    (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = originalServiceXApi;
-  });
+  teardown(restoreStubs);
 
   async function makeLoadedProvider(fetchCounter?: { count: number }): Promise<CacheTreeProvider> {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => {
+    stubConfig();
+    stubCacheRecords(() => {
       if (fetchCounter) {
         fetchCounter.count++;
       }
@@ -536,8 +466,8 @@ suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
         { request_id: 'a1', title: 'A', status: 'COMPLETE' },
         { request_id: 'b1', title: 'B', status: 'FATAL' },
       ];
-    };
-    installFakeServiceXApi({
+    });
+    stubServiceXApi({
       'https://default.example.org': {
         a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
         b1: fakeStatus({ requestId: 'b1', title: 'B', status: 'Fatal' }),
@@ -600,17 +530,12 @@ suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
 
   test('TitleGroupItem.allEntries keeps the full group even when the filter hides some of it', async () => {
     // a1/a2 share a title so filtering can hide one but not the other.
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
+    stubConfig();
+    stubCacheRecords([
       { request_id: 'a1', title: 'A', status: 'COMPLETE' },
       { request_id: 'a2', title: 'A', status: 'CANCELED' },
-    ];
-    installFakeServiceXApi({
+    ]);
+    stubServiceXApi({
       'https://default.example.org': {
         a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
         a2: fakeStatus({ requestId: 'a2', title: 'A', status: 'Canceled' }),
@@ -635,37 +560,24 @@ suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
 });
 
 suite('cacheTreeProvider.ts - CacheTreeProvider backend/failure/date filters, sort, and grouping', () => {
-  const originalLoadConfig = configModule.loadConfig;
-  const originalReadCacheRecords = cacheDbModule.readCacheRecords;
-  const originalServiceXApi = serviceXApiModule.ServiceXApi;
-
-  teardown(() => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = originalLoadConfig;
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = originalReadCacheRecords;
-    (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = originalServiceXApi;
-  });
+  teardown(restoreStubs);
 
   /**
    * Three requests spread across two backends, with distinct titles, submit
-   * dates, and one with failed files - enough variety to exercise every new
-   * filter/sort dimension.
+   * dates, and file counts, and one with failed files - enough variety to
+   * exercise every filter/sort dimension.
    */
   async function makeRichProvider(): Promise<CacheTreeProvider> {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [
-        { name: 'uchicago', endpoint: 'https://uchicago.example.org', token: 't1' },
-        { name: 'testing3', endpoint: 'https://testing3.example.org', token: 't2' },
-      ],
-      defaultEndpoint: 'uchicago',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
+    stubConfig([
+      { name: 'uchicago', endpoint: 'https://uchicago.example.org', token: 't1' },
+      { name: 'testing3', endpoint: 'https://testing3.example.org', token: 't2' },
+    ]);
+    stubCacheRecords([
       { request_id: 'zebra1', title: 'Zebra', status: 'COMPLETE' },
       { request_id: 'apple1', title: 'Apple', status: 'COMPLETE' },
       { request_id: 'mango1', title: 'Mango', status: 'FATAL' },
-    ];
-    installFakeServiceXApi({
+    ]);
+    stubServiceXApi({
       'https://uchicago.example.org': {
         zebra1: fakeStatus({
           requestId: 'zebra1',

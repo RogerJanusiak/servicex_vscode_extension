@@ -1,61 +1,80 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
-import * as serviceXApiModule from '../serviceXApi';
-import { NotFoundError, TransformStatus } from '../serviceXApi';
-import { RequestItem, TitleGroupItem, CacheEntry } from '../cacheTreeProvider';
+import { RequestItem, TitleGroupItem } from '../cacheTreeProvider';
+import {
+  stub,
+  restoreStubs,
+  makeEntry,
+  fakeStatus,
+  stubConfig,
+  stubCacheRecords,
+  stubServiceXApi,
+} from './testUtils';
 
 const EXTENSION_ID = 'RogerJanusiak.servicex-vscode-extension';
-
-function makeEntry(overrides: Partial<CacheEntry>): CacheEntry {
-  return {
-    requestId: 'req-1',
-    title: 'MyTitle',
-    status: 'Complete',
-    files: 1,
-    filesCompleted: 1,
-    filesFailed: 0,
-    stale: false,
-    ...overrides,
-  };
-}
-
-/** Same fake as cacheTreeProvider.test.ts - routes getTransformStatus by endpoint URL. */
-function installFakeServiceXApi(
-  backendData: Record<string, Record<string, TransformStatus | Error>>
-): void {
-  class FakeServiceXApi {
-    constructor(private readonly endpoint: string) {}
-    async getTransformStatus(requestId: string): Promise<TransformStatus> {
-      const result = backendData[this.endpoint]?.[requestId];
-      if (!result) {
-        throw new NotFoundError(`${requestId} not found on ${this.endpoint}`);
-      }
-      if (result instanceof Error) {
-        throw result;
-      }
-      return result;
-    }
-  }
-  (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = FakeServiceXApi;
-}
-
-function fakeStatus(overrides: Partial<TransformStatus>): TransformStatus {
-  return {
-    requestId: 'req',
-    status: 'Complete',
-    files: 1,
-    filesCompleted: 1,
-    filesFailed: 0,
-    ...overrides,
-  };
-}
 
 async function activateExtension(): Promise<void> {
   const ext = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(ext, `Extension ${EXTENSION_ID} not found - is it loaded in the test host?`);
   await ext!.activate();
+}
+
+/** Stubs the fetch pipeline with two backends and two requests (one Fatal with
+ *  failed files on testing3), then forces the extension's shared provider to
+ *  re-fetch from those stubs - so each test starts from known data no matter
+ *  what ran before it. */
+async function loadFakeCache(): Promise<void> {
+  stubConfig([
+    { name: 'uchicago', endpoint: 'https://uchicago.example.org', token: 't1' },
+    { name: 'testing3', endpoint: 'https://testing3.example.org', token: 't2' },
+  ]);
+  stubCacheRecords([
+    { request_id: 'u1', title: 'OnUchicago', status: 'COMPLETE' },
+    { request_id: 't1', title: 'OnTesting3', status: 'FATAL' },
+  ]);
+  stubServiceXApi({
+    'https://uchicago.example.org': {
+      u1: fakeStatus({ requestId: 'u1', title: 'OnUchicago', status: 'Complete' }),
+    },
+    'https://testing3.example.org': {
+      t1: fakeStatus({ requestId: 't1', title: 'OnTesting3', status: 'Fatal', filesFailed: 2 }),
+    },
+  });
+  await vscode.commands.executeCommand('servicex.refreshCache');
+}
+
+/** Stubs showQuickPick to answer the Filter... hub with the given action, then
+ *  answer the sub-prompt (if any) with `subResult`. */
+function driveFilterMenu(action: string, subResult?: unknown): void {
+  let call = 0;
+  stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+    call++;
+    if (call === 1) {
+      return (items as { action: string }[]).find((i) => i.action === action);
+    }
+    return subResult;
+  });
+}
+
+/** Runs Clean on `group` with the confirmation auto-accepted and returns the
+ *  warning text it showed - the observable that proves whether the extension's
+ *  shared provider currently has an active filter. */
+async function captureCleanWarning(group: TitleGroupItem): Promise<string | undefined> {
+  let captured: string | undefined;
+  stub(vscode.window, 'showInformationMessage', () => Promise.resolve(undefined));
+  stub(cacheDbModule, 'deleteCacheRecord', () => true);
+  stub(vscode.window, 'showWarningMessage', async (msg: string) => {
+    captured = msg;
+    return 'Delete';
+  });
+  await vscode.commands.executeCommand('servicex.cleanGroup', group);
+  return captured;
+}
+
+function cancelledGroup(): TitleGroupItem {
+  const cancelled = makeEntry({ requestId: 'cancelled', status: 'Canceled' });
+  return new TitleGroupItem('MyTitle', [cancelled]);
 }
 
 suite('extension.ts - activation', () => {
@@ -82,40 +101,31 @@ suite('extension.ts - activation', () => {
 });
 
 suite('extension.ts - command handlers', () => {
-  const originalLoadConfig = configModule.loadConfig;
-  const originalReadCacheRecords = cacheDbModule.readCacheRecords;
-  const originalDeleteCacheRecord = cacheDbModule.deleteCacheRecord;
-  const originalDeleteAllForTitle = cacheDbModule.deleteAllForTitle;
-  const originalServiceXApi = serviceXApiModule.ServiceXApi;
-  const originalShowWarningMessage = vscode.window.showWarningMessage;
-  const originalShowInformationMessage = vscode.window.showInformationMessage;
-  const originalShowQuickPick = vscode.window.showQuickPick;
-
   suiteSetup(activateExtension);
 
+  // The extension keeps one shared CacheTreeProvider for the whole test
+  // process, so teardown must reset every piece of state a test can touch
+  // through commands: stubs, filters, grouping, and sort.
   teardown(async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = originalLoadConfig;
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = originalReadCacheRecords;
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = originalDeleteCacheRecord;
-    (cacheDbModule as unknown as { deleteAllForTitle: unknown }).deleteAllForTitle = originalDeleteAllForTitle;
-    (serviceXApiModule as unknown as { ServiceXApi: unknown }).ServiceXApi = originalServiceXApi;
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = originalShowWarningMessage;
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage =
-      originalShowInformationMessage;
-    (vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = originalShowQuickPick;
-    // The extension keeps a single shared CacheTreeProvider instance for the
-    // test process's lifetime - clear any filter a test left active so it
-    // doesn't leak into unrelated tests.
+    restoreStubs();
     await vscode.commands.executeCommand('servicex.clearAllFilters');
+    await vscode.commands.executeCommand('servicex.groupByTitle');
+    stub(vscode.window, 'showQuickPick', async (items: unknown) =>
+      (items as { sortBy: string; direction: string }[]).find(
+        (i) => i.sortBy === 'date' && i.direction === 'desc'
+      )
+    );
+    await vscode.commands.executeCommand('servicex.openSortMenu');
+    restoreStubs();
   });
 
   test('servicex.deleteFromCache does nothing when the user dismisses the confirmation', async () => {
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => undefined;
+    stub(vscode.window, 'showWarningMessage', async () => undefined);
     let deleteCalled = false;
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => {
+    stub(cacheDbModule, 'deleteCacheRecord', () => {
       deleteCalled = true;
       return true;
-    };
+    });
 
     const item = new RequestItem(makeEntry({ requestId: 'req-1' }));
     await vscode.commands.executeCommand('servicex.deleteFromCache', item);
@@ -124,25 +134,18 @@ suite('extension.ts - command handlers', () => {
   });
 
   test('servicex.deleteFromCache deletes the record when confirmed', async () => {
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => 'Delete';
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [],
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete');
     let deletedRequestId: string | undefined;
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = (
-      _cachePath: string,
-      requestId: string
-    ) => {
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
       deletedRequestId = requestId;
       return true;
-    };
+    });
     let infoMessage: string | undefined;
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = (msg: string) => {
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
       infoMessage = msg;
       return Promise.resolve(undefined);
-    };
+    });
 
     const item = new RequestItem(makeEntry({ requestId: 'req-1' }));
     await vscode.commands.executeCommand('servicex.deleteFromCache', item);
@@ -153,15 +156,15 @@ suite('extension.ts - command handlers', () => {
 
   test('servicex.cleanGroup shows "nothing to clean" without prompting when there is nothing to delete', async () => {
     let warningShown = false;
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => {
+    stub(vscode.window, 'showWarningMessage', async () => {
       warningShown = true;
       return 'Delete';
-    };
+    });
     let infoMessage: string | undefined;
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = (msg: string) => {
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
       infoMessage = msg;
       return Promise.resolve(undefined);
-    };
+    });
 
     const only = makeEntry({ requestId: 'only', status: 'Complete' });
     const group = new TitleGroupItem('MyTitle', [only]);
@@ -172,22 +175,14 @@ suite('extension.ts - command handlers', () => {
   });
 
   test('servicex.cleanGroup deletes stale/cancelled entries when confirmed', async () => {
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => 'Delete';
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [],
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete');
     const deletedIds: string[] = [];
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = (
-      _cachePath: string,
-      requestId: string
-    ) => {
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
       deletedIds.push(requestId);
       return true;
-    };
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
-      Promise.resolve(undefined);
+    });
+    stub(vscode.window, 'showInformationMessage', () => Promise.resolve(undefined));
 
     const newest = makeEntry({ requestId: 'newest', status: 'Complete', submitTime: new Date(500) });
     const older = makeEntry({ requestId: 'older', status: 'Complete', submitTime: new Date(100) });
@@ -199,23 +194,15 @@ suite('extension.ts - command handlers', () => {
     assert.deepStrictEqual(deletedIds.sort(), ['cancelled', 'older']);
   });
 
-  test('servicex.cleanGroup sweeps entries hidden by the status filter, not just the visible ones', async () => {
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => 'Delete';
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [],
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
+  test('servicex.cleanGroup sweeps entries hidden by an active filter, not just the visible ones', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete');
     const deletedIds: string[] = [];
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = (
-      _cachePath: string,
-      requestId: string
-    ) => {
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
       deletedIds.push(requestId);
       return true;
-    };
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
-      Promise.resolve(undefined);
+    });
+    stub(vscode.window, 'showInformationMessage', () => Promise.resolve(undefined));
 
     const newest = makeEntry({ requestId: 'newest', status: 'Complete', submitTime: new Date(500) });
     const older = makeEntry({ requestId: 'older', status: 'Complete', submitTime: new Date(100) });
@@ -234,100 +221,203 @@ suite('extension.ts - command handlers', () => {
     );
   });
 
-  test('servicex.cleanGroup warns that hidden requests will still be cleaned when a filter is active', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [{ name: 'default', endpoint: 'https://default.example.org', token: 't' }],
-      defaultEndpoint: 'default',
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (cacheDbModule as unknown as { readCacheRecords: unknown }).readCacheRecords = () => [
-      { request_id: 'a1', title: 'A', status: 'COMPLETE' },
-    ];
-    installFakeServiceXApi({
-      'https://default.example.org': {
-        a1: fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' }),
-      },
-    });
-    // Drive the Filter... hub: first pick opens the "Status" sub-menu, then
-    // pick zero of the available statuses - a non-empty, non-"select all"
-    // choice, so the filter ends up active (not cleared).
-    let quickPickCall = 0;
-    (vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = async (items: unknown) => {
-      quickPickCall++;
-      if (quickPickCall === 1) {
-        return (items as { action: string }[]).find((i) => i.action === 'status');
-      }
-      return [];
-    };
-    await vscode.commands.executeCommand('servicex.openFilterMenu');
+  test('servicex.cleanGroup does not mention a filter when none is active', async () => {
+    stubConfig();
 
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
-      Promise.resolve(undefined);
-    let capturedMessage: string | undefined;
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async (msg: string) => {
-      capturedMessage = msg;
-      return 'Delete';
-    };
+    const message = await captureCleanWarning(cancelledGroup());
 
-    const cancelled = makeEntry({ requestId: 'cancelled', status: 'Canceled' });
-    const group = new TitleGroupItem('MyTitle', [], [cancelled]);
-    await vscode.commands.executeCommand('servicex.cleanGroup', group);
-
+    assert.ok(message, 'expected the confirmation prompt to be shown');
     assert.ok(
-      capturedMessage?.includes('A filter is currently active'),
-      `expected the filter warning in: ${capturedMessage}`
+      !message!.includes('filter is currently active'),
+      `did not expect a filter warning in: ${message}`
     );
   });
 
-  test('servicex.cleanGroup does not mention a filter when none is active', async () => {
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [],
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
-      Promise.resolve(undefined);
-    (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
-    let capturedMessage: string | undefined;
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async (msg: string) => {
-      capturedMessage = msg;
-      return 'Delete';
-    };
+  test('a status filter chosen through the Filter menu triggers the cleanGroup warning', async () => {
+    await loadFakeCache();
+    // Deselect everything - a non-empty, non-"select all" choice, so the
+    // filter ends up active rather than cleared.
+    driveFilterMenu('status', []);
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
 
-    const cancelled = makeEntry({ requestId: 'cancelled', status: 'Canceled' });
-    const group = new TitleGroupItem('MyTitle', [cancelled]);
-    await vscode.commands.executeCommand('servicex.cleanGroup', group);
+    const message = await captureCleanWarning(cancelledGroup());
 
     assert.ok(
-      !capturedMessage?.includes('filter is currently active'),
-      `did not expect a filter warning in: ${capturedMessage}`
+      message?.includes('A filter is currently active'),
+      `expected the filter warning in: ${message}`
     );
+  });
+
+  test('a backend filter chosen through the Filter menu triggers the cleanGroup warning', async () => {
+    await loadFakeCache();
+    driveFilterMenu('backend', [{ label: 'testing3' }]);
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    const message = await captureCleanWarning(cancelledGroup());
+
+    assert.ok(
+      message?.includes('A filter is currently active'),
+      `expected the filter warning in: ${message}`
+    );
+  });
+
+  test('a failure filter chosen through the Filter menu triggers the cleanGroup warning', async () => {
+    await loadFakeCache();
+    driveFilterMenu('failures', { label: 'With Failures Only', value: 'withFailures' });
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    const message = await captureCleanWarning(cancelledGroup());
+
+    assert.ok(
+      message?.includes('A filter is currently active'),
+      `expected the filter warning in: ${message}`
+    );
+  });
+
+  test('a date filter chosen through the Filter menu triggers the cleanGroup warning', async () => {
+    await loadFakeCache();
+    driveFilterMenu('date', 'Today');
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    const message = await captureCleanWarning(cancelledGroup());
+
+    assert.ok(
+      message?.includes('A filter is currently active'),
+      `expected the filter warning in: ${message}`
+    );
+  });
+
+  test("the Filter menu's Clear All Filters entry removes every active filter", async () => {
+    await loadFakeCache();
+    driveFilterMenu('status', []);
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+    restoreStubs();
+    stubConfig();
+
+    driveFilterMenu('clear');
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    const message = await captureCleanWarning(cancelledGroup());
+    assert.ok(
+      !message?.includes('filter is currently active'),
+      `did not expect a filter warning in: ${message}`
+    );
+  });
+
+  test('servicex.clearAllFilters removes every active filter', async () => {
+    await loadFakeCache();
+    driveFilterMenu('status', []);
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    await vscode.commands.executeCommand('servicex.clearAllFilters');
+
+    const message = await captureCleanWarning(cancelledGroup());
+    assert.ok(
+      !message?.includes('filter is currently active'),
+      `did not expect a filter warning in: ${message}`
+    );
+  });
+
+  test('dismissing the Filter menu hub leaves filters untouched', async () => {
+    stubConfig();
+    stub(vscode.window, 'showQuickPick', async () => undefined);
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    const message = await captureCleanWarning(cancelledGroup());
+    assert.ok(
+      !message?.includes('filter is currently active'),
+      `did not expect a filter warning in: ${message}`
+    );
+  });
+
+  test('the Filter menu shows an info message instead of the status picker when the cache is empty', async () => {
+    stubConfig();
+    stubCacheRecords([]);
+    stubServiceXApi({});
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    driveFilterMenu('status');
+    await vscode.commands.executeCommand('servicex.openFilterMenu');
+
+    assert.ok(infoMessage?.includes('No cached transform requests to filter yet'));
+  });
+
+  test('the Sort menu offers all six orderings and marks the current one', async () => {
+    let captured: { label: string; description?: string }[] = [];
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      captured = items as { label: string; description?: string }[];
+      return undefined;
+    });
+
+    await vscode.commands.executeCommand('servicex.openSortMenu');
+
+    assert.deepStrictEqual(
+      captured.map((i) => i.label),
+      [
+        'Title (A → Z)',
+        'Title (Z → A)',
+        'Date (Newest First)',
+        'Date (Oldest First)',
+        'Total Files (Most First)',
+        'Total Files (Fewest First)',
+      ]
+    );
+    // Teardown resets the shared provider to the default sort, so that is
+    // what must carry the "current" marker here.
+    assert.deepStrictEqual(
+      captured.filter((i) => i.description === 'current').map((i) => i.label),
+      ['Date (Newest First)']
+    );
+  });
+
+  test('picking a sort applies it: the next Sort menu marks the new choice as current', async () => {
+    stub(vscode.window, 'showQuickPick', async (items: unknown) =>
+      (items as { label: string }[]).find((i) => i.label === 'Title (A → Z)')
+    );
+    await vscode.commands.executeCommand('servicex.openSortMenu');
+    restoreStubs();
+
+    let captured: { label: string; description?: string }[] = [];
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      captured = items as { label: string; description?: string }[];
+      return undefined;
+    });
+    await vscode.commands.executeCommand('servicex.openSortMenu');
+
+    assert.deepStrictEqual(
+      captured.filter((i) => i.description === 'current').map((i) => i.label),
+      ['Title (A → Z)']
+    );
+  });
+
+  test('servicex.ungroup and servicex.groupByTitle execute cleanly', async () => {
+    // The grouped/ungrouped rendering itself is covered by the provider
+    // tests; VS Code offers no API to read back a tree view's contents or a
+    // context key, so at the command level this covers the wiring only.
+    await vscode.commands.executeCommand('servicex.ungroup');
+    await vscode.commands.executeCommand('servicex.groupByTitle');
   });
 
   test('servicex.deleteGroup deletes every request in the group when confirmed', async () => {
-    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = async () => 'Delete All';
-    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
-      endpoints: [],
-      cachePath: '/fake/cache',
-      configFile: '/fake/servicex.yaml',
-    });
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
     let deletedTitle: string | undefined;
-    (cacheDbModule as unknown as { deleteAllForTitle: unknown }).deleteAllForTitle = (
-      _cachePath: string,
-      title: string
-    ) => {
+    stub(cacheDbModule, 'deleteAllForTitle', (_cachePath: string, title: string) => {
       deletedTitle = title;
       return 3;
-    };
+    });
     let infoMessage: string | undefined;
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = (msg: string) => {
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
       infoMessage = msg;
       return Promise.resolve(undefined);
-    };
+    });
 
-    const group = new TitleGroupItem('MyTitle', [makeEntry({}), makeEntry({}), makeEntry({})]);
+    const group = new TitleGroupItem('MyTitle', [makeEntry(), makeEntry(), makeEntry()]);
     await vscode.commands.executeCommand('servicex.deleteGroup', group);
 
     assert.strictEqual(deletedTitle, 'MyTitle');
@@ -358,10 +448,10 @@ suite('extension.ts - command handlers', () => {
   test('servicex.copyFileList shows an info message instead of copying when there is nothing to copy', async () => {
     await vscode.env.clipboard.writeText('sentinel-before');
     let infoMessage: string | undefined;
-    (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = (msg: string) => {
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
       infoMessage = msg;
       return Promise.resolve(undefined);
-    };
+    });
 
     const item = new RequestItem(makeEntry({ requestId: 'req-empty', fileList: undefined }));
     await vscode.commands.executeCommand('servicex.copyFileList', item);

@@ -164,6 +164,17 @@ suite('serviceXApi.ts', () => {
     });
   });
 
+  test('getTransformStatus throws when the token refresh itself is rejected', async () => {
+    mockFetch([{ status: 500, body: {} }]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+
+    await assert.rejects(
+      () => api.getTransformStatus('req-1'),
+      /ServiceX access token request rejected \[500\]/
+    );
+  });
+
   test('getTransformStatus throws when there is no refresh token configured', async () => {
     mockFetch([]);
     const api = new ServiceXApi('https://example.org', undefined);
