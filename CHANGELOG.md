@@ -2,6 +2,28 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [0.2.0] - 2026-07-29
+
+### Added
+
+- Multi-backend fallback: if a cached request isn't found on the default
+  backend, every other configured backend is tried in order. Once any
+  request needed a fallback, every row shows which backend it actually came
+  from (rows are left unlabeled when everything resolves on the default).
+- **Clean Old Requests** now also removes failed ("Fatal") requests, not
+  just cancelled ones.
+- Per-request right-click actions: **Copy Request ID** and **Copy File
+  List** (newline-joined paths of that request's downloaded files).
+- File counts now show as `Complete`/`Failed`/`Total`, using the backend's
+  real completed-file count rather than an approximation.
+- Full automated test suite (`npm test`, running inside a real VS Code
+  instance via `@vscode/test-cli`) and a GitHub Actions workflow that runs
+  it on every push and pull request.
+
+### Changed
+
+- Renamed the extension from "ServiceX" to "ServiceX Helper".
+
 ## [0.1.0] - 2026-07-28
 
 ### Added
