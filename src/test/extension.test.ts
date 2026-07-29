@@ -282,6 +282,11 @@ suite('extension.ts - command handlers', () => {
   });
 
   test('servicex.cleanGroup does not mention a filter when none is active', async () => {
+    (configModule as unknown as { loadConfig: unknown }).loadConfig = () => ({
+      endpoints: [],
+      cachePath: '/fake/cache',
+      configFile: '/fake/servicex.yaml',
+    });
     (vscode.window as unknown as { showInformationMessage: unknown }).showInformationMessage = () =>
       Promise.resolve(undefined);
     (cacheDbModule as unknown as { deleteCacheRecord: unknown }).deleteCacheRecord = () => true;
