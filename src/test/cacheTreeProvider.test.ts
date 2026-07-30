@@ -6,8 +6,10 @@ import * as vscode from 'vscode';
 import {
   CacheTreeProvider,
   MessageItem,
+  RequestDetailItem,
   RequestItem,
   TitleGroupItem,
+  buildRequestDetails,
   computeCleanPlan,
   filterEntries,
   formatBytes,
@@ -302,31 +304,56 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
     assert.strictEqual(withoutSize.description, '1 request');
   });
 
-  test('RequestItem shows file counts, no backend/stale marker for a normal entry', () => {
+  test('RequestItem is collapsed by default, showing only status and dates - no files/size/backend', () => {
     const entry = makeEntry({
       status: 'Complete',
       filesCompleted: 8,
       filesFailed: 2,
       files: 10,
+      sizeBytes: 1024 * 1024,
+      backend: 'testing3',
+      submitTime: new Date(2026, 0, 1),
+      finishTime: new Date(2026, 0, 2),
     });
 
     const item = new RequestItem(entry);
 
     assert.strictEqual(item.label, 'Complete');
-    assert.ok(item.description?.toString().includes('Complete 8'));
-    assert.ok(item.description?.toString().includes('Failed 2'));
-    assert.ok(item.description?.toString().includes('Total 10'));
-    assert.ok(!item.description?.toString().includes('via'));
-    assert.strictEqual(item.iconPath, undefined);
+    assert.strictEqual(item.collapsibleState, vscode.TreeItemCollapsibleState.Collapsed);
+    assert.ok(item.description?.toString().includes('→'), 'expected the submit → finish date range');
+    assert.ok(!item.description?.toString().includes('Complete 8'), 'file counts should not be in the collapsed row');
+    assert.ok(!item.description?.toString().includes('MB'), 'size should not be in the collapsed row');
+    assert.ok(!item.description?.toString().includes('via'), 'backend should not be in the collapsed row');
     assert.strictEqual(item.contextValue, 'servicexCacheRequest');
   });
 
-  test('RequestItem shows the backend when set, and a warning icon when stale', () => {
+  test('RequestItem prefixes the title in its description only when asked to (ungrouped view)', () => {
+    const entry = makeEntry({ title: 'MyRequest' });
+
+    assert.ok(!new RequestItem(entry).description?.toString().includes('MyRequest'));
+    assert.ok(new RequestItem(entry, { showTitle: true }).description?.toString().includes('MyRequest'));
+  });
+
+  test('RequestItem pads a missing submit date so "→" lines up with rows that have one', () => {
+    const withBothDates = new RequestItem(
+      makeEntry({ submitTime: new Date(2026, 0, 15, 14, 30), finishTime: new Date(2026, 0, 16, 9, 5) })
+    );
+    const withNoSubmitDate = new RequestItem(makeEntry({ submitTime: undefined, finishTime: undefined }));
+
+    const arrowColumn = (description: string) => description.indexOf('→');
+
+    assert.ok(arrowColumn(withBothDates.description!.toString()) > 0);
+    assert.strictEqual(
+      arrowColumn(withBothDates.description!.toString()),
+      arrowColumn(withNoSubmitDate.description!.toString())
+    );
+  });
+
+  test('RequestItem shows the backend in its tooltip when set, and a warning icon when stale', () => {
     const entry = makeEntry({ backend: 'testing3', stale: true });
 
     const item = new RequestItem(entry);
 
-    assert.ok(item.description?.toString().includes('via testing3'));
     assert.ok(item.tooltip?.toString().includes('Backend: testing3'));
     assert.ok(item.iconPath instanceof vscode.ThemeIcon);
     assert.strictEqual((item.iconPath as vscode.ThemeIcon).id, 'warning');
@@ -340,14 +367,49 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
     assert.ok(!withoutFiles.tooltip?.toString().includes('Downloaded files'));
   });
 
-  test('RequestItem shows size on disk in description and tooltip only when something has downloaded', () => {
+  test('RequestItem tooltip mentions size on disk only when something has downloaded', () => {
     const withSize = new RequestItem(makeEntry({ sizeBytes: 1024 * 1024 }));
-    assert.ok(withSize.description?.toString().includes('1.0 MB'));
-    assert.ok(withSize.tooltip?.toString().includes('Size on disk: 1.0 MB'));
-
     const withoutSize = new RequestItem(makeEntry({ sizeBytes: 0 }));
-    assert.ok(!withoutSize.description?.toString().includes('B'));
+
+    assert.ok(withSize.tooltip?.toString().includes('Size on disk: 1.0 MB'));
     assert.ok(!withoutSize.tooltip?.toString().includes('Size on disk'));
+  });
+
+  test('buildRequestDetails always includes request ID and file counts', () => {
+    const details = buildRequestDetails(
+      makeEntry({ requestId: 'req-42', filesCompleted: 8, filesFailed: 2, files: 10 })
+    );
+
+    assert.deepStrictEqual(
+      details.map((d) => d.label),
+      ['Request ID: req-42', 'Files: Complete 8 · Failed 2 · Total 10']
+    );
+    assert.ok(details.every((d) => d.contextValue === 'servicexRequestDetail'));
+    assert.ok(details.every((d) => d.collapsibleState === vscode.TreeItemCollapsibleState.None));
+  });
+
+  test('buildRequestDetails adds downloaded-files/size/backend rows only when there is something to say', () => {
+    const bare = buildRequestDetails(makeEntry({ sizeBytes: 0, backend: undefined, fileList: undefined }));
+    assert.deepStrictEqual(
+      bare.map((d) => d.label),
+      ['Request ID: req', 'Files: Complete 1 · Failed 0 · Total 1']
+    );
+
+    const full = buildRequestDetails(
+      makeEntry({ sizeBytes: 2048, backend: 'uchicago', fileList: ['/a', '/b', '/c'] })
+    );
+    // Downloaded files sits right below the transformed-files line, ahead
+    // of size/backend.
+    assert.deepStrictEqual(
+      full.map((d) => d.label),
+      [
+        'Request ID: req',
+        'Files: Complete 1 · Failed 0 · Total 1',
+        'Downloaded files: 3',
+        'Size on disk: 2.0 KB',
+        'Backend: uchicago',
+      ]
+    );
   });
 
   test('MessageItem carries only a label, optionally with an icon', () => {
@@ -414,6 +476,11 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     assert.strictEqual(children.length, 1);
     assert.ok(children[0] instanceof RequestItem);
     assert.strictEqual((children[0] as RequestItem).entry.requestId, 'b1');
+
+    // Expanding that RequestItem in turn shows its detail rows.
+    const details = await provider.getChildren(children[0]);
+    assert.ok(details.every((d) => d instanceof RequestDetailItem));
+    assert.ok((details as RequestDetailItem[]).some((d) => d.label === 'Request ID: b1'));
   });
 
   test('falls back to a secondary backend and tags every entry once any fallback happens', async () => {
@@ -449,7 +516,7 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     assert.strictEqual(byId.get('on-secondary')?.backend, 'secondary');
   });
 
-  test('keeps entry.backend populated (for filtering) but hides the "via" tag when only one backend is in play', async () => {
+  test('keeps entry.backend populated (for filtering) even when everything is on the same single backend', async () => {
     stubConfig([
       { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
       { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
@@ -466,10 +533,11 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     const roots = await provider.getChildren();
     const entries = (await provider.getChildren(roots[0])) as RequestItem[];
 
-    // The actual backend is always tracked (so it can be filtered on)...
     assert.strictEqual(entries[0].entry.backend, 'primary');
-    // ...but since every entry is on the same single backend, the rendered
-    // row shouldn't bother calling it out - that'd just be noise.
+    // The collapsed row never shows backend (or any other detail) regardless
+    // of how many backends are configured - it only ever shows in the
+    // expanded detail rows (see buildRequestDetails tests) or the backend
+    // filter picker.
     assert.ok(!entries[0].description?.toString().includes('via'));
   });
 

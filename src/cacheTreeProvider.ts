@@ -105,13 +105,27 @@ function formatDateTime(value?: Date): string {
     return '-';
   }
   return value.toLocaleString(undefined, {
-    weekday: 'short',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+// Every real formatted date/time is the same length (fixed-width numeric
+// fields), so this reference sample - not the "-" placeholder for a missing
+// date - is what determines the padded width below.
+const DATE_TIME_WIDTH = formatDateTime(new Date(2000, 0, 1, 0, 0)).length;
+
+/**
+ * Pads a formatted submit date (or the "-" placeholder for a missing one) up
+ * to the width of a real date/time, so the "->" before the finish date lands
+ * in the same column on every row. Uses non-breaking spaces - plain spaces
+ * get collapsed by the tree view's rendering.
+ */
+function padDateTime(formatted: string): string {
+  return formatted.padEnd(DATE_TIME_WIDTH, ' ');
 }
 
 /** Combined size on disk of every entry in a group. */
@@ -173,19 +187,18 @@ export class MessageItem extends vscode.TreeItem {
   }
 }
 
+/**
+ * Shows only status and dates right away - everything else (request ID,
+ * file counts, size, backend, downloaded files) is available by expanding
+ * the row into its RequestDetailItem children, rather than crowding the
+ * collapsed row.
+ */
 export class RequestItem extends vscode.TreeItem {
-  constructor(
-    public readonly entry: CacheEntry,
-    options?: { showTitle?: boolean; showBackend?: boolean }
-  ) {
-    super(entry.status, vscode.TreeItemCollapsibleState.None);
-    const showBackend = (options?.showBackend ?? true) && !!entry.backend;
+  constructor(public readonly entry: CacheEntry, options?: { showTitle?: boolean }) {
+    super(entry.status, vscode.TreeItemCollapsibleState.Collapsed);
     this.description =
       (options?.showTitle ? `${entry.title} · ` : '') +
-      `${formatDateTime(entry.submitTime)} → ${formatDateTime(entry.finishTime)} · ` +
-      `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}` +
-      (entry.sizeBytes > 0 ? ` · ${formatBytes(entry.sizeBytes)}` : '') +
-      (showBackend ? ` · via ${entry.backend}` : '');
+      `${padDateTime(formatDateTime(entry.submitTime))} → ${formatDateTime(entry.finishTime)}`;
     this.tooltip = [
       `Title: ${entry.title}`,
       `Request ID: ${entry.requestId}`,
@@ -206,7 +219,39 @@ export class RequestItem extends vscode.TreeItem {
   }
 }
 
-type CacheNode = TitleGroupItem | RequestItem | MessageItem;
+/** A single read-only fact about a request - shown as a child when its RequestItem is expanded. */
+export class RequestDetailItem extends vscode.TreeItem {
+  constructor(label: string) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.contextValue = 'servicexRequestDetail';
+  }
+}
+
+/**
+ * Everything about a request besides status/dates (already visible on the
+ * collapsed row), one fact per row: request ID and file counts always,
+ * size/backend/downloaded-files only when there's something to say.
+ */
+export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
+  const details = [
+    new RequestDetailItem(`Request ID: ${entry.requestId}`),
+    new RequestDetailItem(
+      `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}`
+    ),
+  ];
+  if (entry.fileList?.length) {
+    details.push(new RequestDetailItem(`Downloaded files: ${entry.fileList.length}`));
+  }
+  if (entry.sizeBytes > 0) {
+    details.push(new RequestDetailItem(`Size on disk: ${formatBytes(entry.sizeBytes)}`));
+  }
+  if (entry.backend) {
+    details.push(new RequestDetailItem(`Backend: ${entry.backend}`));
+  }
+  return details;
+}
+
+type CacheNode = TitleGroupItem | RequestItem | RequestDetailItem | MessageItem;
 
 export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
@@ -224,9 +269,6 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   private sortBy: SortBy = 'date';
   private sortDirection: SortDirection = 'desc';
   private groupingEnabled = true;
-
-  /** Only show "via <backend>" on rows when more than one backend is actually in play. */
-  private showBackendTag = false;
 
   refresh(): void {
     this.loaded = false;
@@ -345,7 +387,6 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
    * requests even when a filter is hiding them from view.
    */
   private rebuildTree(): void {
-    this.showBackendTag = this.getAvailableBackends().length > 1;
     const filtered = this.filteredEntries();
 
     if (this.groupingEnabled) {
@@ -363,7 +404,7 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       );
     } else {
       this.rootNodes = sortEntries(filtered, this.sortBy, this.sortDirection).map(
-        (e) => new RequestItem(e, { showTitle: true, showBackend: this.showBackendTag })
+        (e) => new RequestItem(e, { showTitle: true })
       );
     }
   }
@@ -374,7 +415,10 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
   async getChildren(element?: CacheNode): Promise<CacheNode[]> {
     if (element instanceof TitleGroupItem) {
-      return element.entries.map((e) => new RequestItem(e, { showBackend: this.showBackendTag }));
+      return element.entries.map((e) => new RequestItem(e));
+    }
+    if (element instanceof RequestItem) {
+      return buildRequestDetails(element.entry);
     }
     if (element) {
       return [];
