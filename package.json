@@ -60,6 +60,16 @@
         "icon": "$(link-external)"
       },
       {
+        "command": "servicex.openCacheFolder",
+        "title": "ServiceX: Open Cache Folder",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "servicex.openCacheRootFolder",
+        "title": "ServiceX: Open Root Cache Folder",
+        "icon": "$(folder-opened)"
+      },
+      {
         "command": "servicex.openFilterMenu",
         "title": "ServiceX: Filter...",
         "icon": "$(filter)"
@@ -132,6 +142,11 @@
           "command": "servicex.clearAllFilters",
           "when": "view == servicexCacheView",
           "group": "1_filter"
+        },
+        {
+          "command": "servicex.openCacheRootFolder",
+          "when": "view == servicexCacheView",
+          "group": "2_folder"
         }
       ],
       "view/item/context": [
@@ -154,6 +169,11 @@
           "command": "servicex.openDashboard",
           "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
           "group": "2_open@1"
+        },
+        {
+          "command": "servicex.openCacheFolder",
+          "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
+          "group": "2_open@2"
         },
         {
           "command": "servicex.cleanGroup",

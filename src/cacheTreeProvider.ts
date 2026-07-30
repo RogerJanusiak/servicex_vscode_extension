@@ -22,6 +22,9 @@ export interface CacheEntry {
   /** Size on disk of this request's downloaded files, in bytes - 0 if
    *  nothing has been downloaded yet (e.g. still SUBMITTED). */
   sizeBytes: number;
+  /** Local directory holding this request's downloaded files - undefined
+   *  for a still-SUBMITTED request with nothing downloaded yet. */
+  dataDir?: string;
 }
 
 /** Formats a byte count as a human-readable size, e.g. "512 B", "1.5 KB", "128.4 MB". */
@@ -421,9 +424,15 @@ function localFileList(local: CacheDbRecord): string[] | undefined {
   return Array.isArray(local.file_list) ? (local.file_list as string[]) : undefined;
 }
 
+/** The local directory holding a request's downloaded files - undefined for a SUBMITTED record. */
+function localDataDir(local: CacheDbRecord): string | undefined {
+  return typeof local.data_dir === 'string' ? local.data_dir : undefined;
+}
+
 /** Size on disk of a request's downloaded files - 0 for a SUBMITTED record, which has no data_dir yet. */
 function localSizeBytes(local: CacheDbRecord): number {
-  return typeof local.data_dir === 'string' ? directorySize(local.data_dir) : 0;
+  const dataDir = localDataDir(local);
+  return dataDir ? directorySize(dataDir) : 0;
 }
 
 async function fetchOneEntry(
@@ -449,6 +458,7 @@ async function fetchOneEntry(
         backend: name,
         fileList: localFileList(local),
         sizeBytes: localSizeBytes(local),
+        dataDir: localDataDir(local),
       };
     } catch (e) {
       lastError = e;
@@ -477,6 +487,7 @@ async function fetchOneEntry(
     stale: true,
     fileList: localFileList(local),
     sizeBytes: localSizeBytes(local),
+    dataDir: localDataDir(local),
   };
 }
 

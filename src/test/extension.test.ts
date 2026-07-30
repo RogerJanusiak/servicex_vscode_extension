@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
@@ -100,6 +103,8 @@ suite('extension.ts - activation', () => {
       'servicex.copyRequestId',
       'servicex.copyFileList',
       'servicex.openDashboard',
+      'servicex.openCacheFolder',
+      'servicex.openCacheRootFolder',
       'servicex.openFilterMenu',
       'servicex.clearAllFilters',
       'servicex.openSortMenu',
@@ -530,5 +535,117 @@ suite('extension.ts - command handlers', () => {
     assert.strictEqual(openCalled, false);
     assert.ok(infoMessage?.includes("Can't open the dashboard for req-2"));
     assert.ok(infoMessage?.includes("'renamed'"));
+  });
+
+  test("servicex.openCacheFolder opens the request's data_dir as a new VS Code window", async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-open-folder-test-'));
+    try {
+      const realExecuteCommand = vscode.commands.executeCommand;
+      let openFolderArgs: unknown[] | undefined;
+      stub(
+        vscode.commands,
+        'executeCommand',
+        // Pass every command through to the real dispatcher (so our own
+        // servicex.openCacheFolder invocation below still reaches its real
+        // handler) except vscode.openFolder itself, which would otherwise
+        // try to tear down this very test host and open a new window.
+        (command: string, ...args: unknown[]) => {
+          if (command === 'vscode.openFolder') {
+            openFolderArgs = args;
+            return Promise.resolve();
+          }
+          return (realExecuteCommand as (...a: unknown[]) => Thenable<unknown>)(command, ...args);
+        }
+      );
+
+      const item = new RequestItem(makeEntry({ requestId: 'req-1', dataDir }));
+      await vscode.commands.executeCommand('servicex.openCacheFolder', item);
+
+      assert.ok(openFolderArgs, 'expected vscode.openFolder to have been invoked');
+      const [uri, forceNewWindow] = openFolderArgs!;
+      assert.strictEqual((uri as vscode.Uri).fsPath, dataDir);
+      assert.strictEqual(forceNewWindow, true);
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('servicex.openCacheFolder shows an info message instead when the request has no data_dir', async () => {
+    let openFolderCalled = false;
+    const realExecuteCommand = vscode.commands.executeCommand;
+    stub(vscode.commands, 'executeCommand', (command: string, ...args: unknown[]) => {
+      if (command === 'vscode.openFolder') {
+        openFolderCalled = true;
+        return Promise.resolve();
+      }
+      return (realExecuteCommand as (...a: unknown[]) => Thenable<unknown>)(command, ...args);
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-submitted', dataDir: undefined }));
+    await vscode.commands.executeCommand('servicex.openCacheFolder', item);
+
+    assert.strictEqual(openFolderCalled, false);
+    assert.ok(infoMessage?.includes('No downloaded files to open for req-submitted yet'));
+  });
+
+  test('servicex.openCacheFolder shows an info message instead when the data_dir no longer exists on disk', async () => {
+    let openFolderCalled = false;
+    const realExecuteCommand = vscode.commands.executeCommand;
+    stub(vscode.commands, 'executeCommand', (command: string, ...args: unknown[]) => {
+      if (command === 'vscode.openFolder') {
+        openFolderCalled = true;
+        return Promise.resolve();
+      }
+      return (realExecuteCommand as (...a: unknown[]) => Thenable<unknown>)(command, ...args);
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    // A data_dir the local db still references but that was removed some
+    // other way (e.g. manually, or by a different tool) since it was cached.
+    const missingDir = path.join(os.tmpdir(), 'servicex-does-not-exist-' + Date.now());
+    const item = new RequestItem(makeEntry({ requestId: 'req-gone', dataDir: missingDir }));
+    await vscode.commands.executeCommand('servicex.openCacheFolder', item);
+
+    assert.strictEqual(openFolderCalled, false);
+    assert.ok(infoMessage?.includes("doesn't exist on disk"));
+  });
+
+  test('servicex.openCacheRootFolder opens the configured cache_path as a new VS Code window', async () => {
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-cache-root-test-'));
+    try {
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [],
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+
+      const realExecuteCommand = vscode.commands.executeCommand;
+      let openFolderArgs: unknown[] | undefined;
+      stub(vscode.commands, 'executeCommand', (command: string, ...args: unknown[]) => {
+        if (command === 'vscode.openFolder') {
+          openFolderArgs = args;
+          return Promise.resolve();
+        }
+        return (realExecuteCommand as (...a: unknown[]) => Thenable<unknown>)(command, ...args);
+      });
+
+      await vscode.commands.executeCommand('servicex.openCacheRootFolder');
+
+      assert.ok(openFolderArgs, 'expected vscode.openFolder to have been invoked');
+      const [uri, forceNewWindow] = openFolderArgs!;
+      assert.strictEqual((uri as vscode.Uri).fsPath, cachePath);
+      assert.strictEqual(forceNewWindow, true);
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
   });
 });

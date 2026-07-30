@@ -462,7 +462,7 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     assert.strictEqual(entries[0].entry.status, 'Not found on any backend');
   });
 
-  test("computes an entry's sizeBytes from its data_dir on disk, and 0 when it has none", async () => {
+  test("computes an entry's sizeBytes and dataDir from its local data_dir, and both are empty when it has none", async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-size-test-'));
     try {
       fs.writeFileSync(path.join(dataDir, 'file1.root'), 'x'.repeat(1024));
@@ -488,7 +488,9 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
       const byId = new Map(allEntries.map((e) => [e.requestId, e]));
 
       assert.strictEqual(byId.get('downloaded')?.sizeBytes, 3072);
+      assert.strictEqual(byId.get('downloaded')?.dataDir, dataDir);
       assert.strictEqual(byId.get('submitted')?.sizeBytes, 0);
+      assert.strictEqual(byId.get('submitted')?.dataDir, undefined);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
     }

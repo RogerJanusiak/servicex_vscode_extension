@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 import {
   CacheTreeProvider,
@@ -21,6 +22,27 @@ function resolveConfig(): ServiceXConfig {
 
 function resolveCachePath(): string {
   return resolveConfig().cachePath;
+}
+
+/**
+ * Opens `targetPath` as a new VS Code window. Deliberately not "Reveal in
+ * Finder/Explorer" (`revealFileInOS`) - that command has no meaningful
+ * behavior over Remote-SSH (there's no GUI on a headless analysis-facility
+ * login node to show a native file browser on). `vscode.openFolder` is
+ * remote-aware instead: giving it a URI stamped with the current workspace's
+ * scheme/authority keeps it on the same host (local or the connected SSH
+ * remote) without any extra local-vs-remote branching here.
+ */
+async function openFolderInNewWindow(targetPath: string): Promise<void> {
+  if (!fs.existsSync(targetPath)) {
+    vscode.window.showInformationMessage(`${targetPath} doesn't exist on disk.`);
+    return;
+  }
+  const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+  const targetUri = workspaceUri
+    ? vscode.Uri.from({ scheme: workspaceUri.scheme, authority: workspaceUri.authority, path: targetPath })
+    : vscode.Uri.file(targetPath);
+  await vscode.commands.executeCommand('vscode.openFolder', targetUri, true);
 }
 
 const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[] = [
@@ -85,6 +107,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('servicex.refreshCache', () => {
       cacheTreeProvider.refresh();
       updateCacheSizeLabel();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.openCacheRootFolder', async () => {
+      await openFolderInNewWindow(resolveConfig().cachePath);
     })
   );
 
@@ -321,6 +349,19 @@ export function activate(context: vscode.ExtensionContext) {
       }
       const url = `${endpoint.endpoint.replace(/\/+$/, '')}/transformation-request/${item.entry.requestId}`;
       await vscode.env.openExternal(vscode.Uri.parse(url));
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.openCacheFolder', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      if (!item.entry.dataDir) {
+        vscode.window.showInformationMessage(`No downloaded files to open for ${item.entry.requestId} yet.`);
+        return;
+      }
+      await openFolderInNewWindow(item.entry.dataDir);
     })
   );
 
