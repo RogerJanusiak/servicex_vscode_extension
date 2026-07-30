@@ -89,6 +89,7 @@ suite('extension.ts - activation', () => {
       'servicex.deleteGroup',
       'servicex.copyRequestId',
       'servicex.copyFileList',
+      'servicex.openDashboard',
       'servicex.openFilterMenu',
       'servicex.clearAllFilters',
       'servicex.openSortMenu',
@@ -458,5 +459,66 @@ suite('extension.ts - command handlers', () => {
 
     assert.strictEqual(await vscode.env.clipboard.readText(), 'sentinel-before');
     assert.ok(infoMessage?.includes('No downloaded files to copy for req-empty'));
+  });
+
+  test('servicex.openDashboard opens the transformation-request page for the entry\'s backend', async () => {
+    stubConfig([
+      { name: 'uchicago', endpoint: 'https://servicex.af.uchicago.edu/', token: 't1' },
+      { name: 'testing3', endpoint: 'https://testing3.example.org', token: 't2' },
+    ]);
+    let openedUrl: string | undefined;
+    stub(vscode.env, 'openExternal', async (uri: vscode.Uri) => {
+      openedUrl = uri.toString();
+      return true;
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'uchicago' }));
+    await vscode.commands.executeCommand('servicex.openDashboard', item);
+
+    // The endpoint's trailing slash must not produce a doubled slash in the URL.
+    assert.strictEqual(openedUrl, 'https://servicex.af.uchicago.edu/transformation-request/req-1');
+  });
+
+  test('servicex.openDashboard shows an info message instead when the entry has no known backend', async () => {
+    let openCalled = false;
+    stub(vscode.env, 'openExternal', async () => {
+      openCalled = true;
+      return true;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-stale', backend: undefined }));
+    await vscode.commands.executeCommand('servicex.openDashboard', item);
+
+    assert.strictEqual(openCalled, false);
+    assert.ok(infoMessage?.includes("Can't open the dashboard for req-stale"));
+    assert.ok(infoMessage?.includes('backend'));
+  });
+
+  test('servicex.openDashboard shows an info message when the backend is not in the current config', async () => {
+    stubConfig([{ name: 'uchicago', endpoint: 'https://servicex.af.uchicago.edu/', token: 't1' }]);
+    let openCalled = false;
+    stub(vscode.env, 'openExternal', async () => {
+      openCalled = true;
+      return true;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    // "renamed" isn't in the stubbed config - e.g. the user renamed/removed
+    // that backend from servicex.yaml since this request was cached.
+    const item = new RequestItem(makeEntry({ requestId: 'req-2', backend: 'renamed' }));
+    await vscode.commands.executeCommand('servicex.openDashboard', item);
+
+    assert.strictEqual(openCalled, false);
+    assert.ok(infoMessage?.includes("Can't open the dashboard for req-2"));
+    assert.ok(infoMessage?.includes("'renamed'"));
   });
 });

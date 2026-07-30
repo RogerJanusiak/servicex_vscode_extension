@@ -55,6 +55,11 @@
         "icon": "$(files)"
       },
       {
+        "command": "servicex.openDashboard",
+        "title": "ServiceX: Open in Dashboard",
+        "icon": "$(link-external)"
+      },
+      {
         "command": "servicex.openFilterMenu",
         "title": "ServiceX: Filter...",
         "icon": "$(filter)"
@@ -144,6 +149,11 @@
           "command": "servicex.copyFileList",
           "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
           "group": "1_copy@2"
+        },
+        {
+          "command": "servicex.openDashboard",
+          "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
+          "group": "2_open@1"
         },
         {
           "command": "servicex.cleanGroup",

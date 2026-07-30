@@ -8,14 +8,18 @@ import {
   SortBy,
   SortDirection,
 } from './cacheTreeProvider';
-import { loadConfig } from './config';
+import { loadConfig, ServiceXConfig } from './config';
 import { deleteCacheRecord, deleteAllForTitle } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
 
-function resolveCachePath(): string {
+function resolveConfig(): ServiceXConfig {
   const settings = vscode.workspace.getConfiguration('servicex');
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  return loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder).cachePath;
+  return loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
+}
+
+function resolveCachePath(): string {
+  return resolveConfig().cachePath;
 }
 
 const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[] = [
@@ -274,6 +278,29 @@ export function activate(context: vscode.ExtensionContext) {
       }
       await vscode.env.clipboard.writeText(fileList.join('\n'));
       vscode.window.setStatusBarMessage(`Copied ${fileList.length} file path(s) to clipboard`, 3000);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.openDashboard', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      if (!item.entry.backend) {
+        vscode.window.showInformationMessage(
+          `Can't open the dashboard for ${item.entry.requestId} - its backend couldn't be determined.`
+        );
+        return;
+      }
+      const endpoint = resolveConfig().endpoints.find((e) => e.name === item.entry.backend);
+      if (!endpoint) {
+        vscode.window.showInformationMessage(
+          `Can't open the dashboard for ${item.entry.requestId} - backend '${item.entry.backend}' is not configured.`
+        );
+        return;
+      }
+      const url = `${endpoint.endpoint.replace(/\/+$/, '')}/transformation-request/${item.entry.requestId}`;
+      await vscode.env.openExternal(vscode.Uri.parse(url));
     })
   );
 
