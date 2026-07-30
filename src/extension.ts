@@ -39,7 +39,7 @@ async function openFolderInNewWindow(targetPath: string): Promise<void> {
     return;
   }
   const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
-  const targetUri = workspaceUri
+  const targetUri = workspaceUri && workspaceUri.scheme !== 'file'
     ? vscode.Uri.from({ scheme: workspaceUri.scheme, authority: workspaceUri.authority, path: targetPath })
     : vscode.Uri.file(targetPath);
   await vscode.commands.executeCommand('vscode.openFolder', targetUri, true);
