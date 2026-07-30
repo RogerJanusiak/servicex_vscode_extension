@@ -2,7 +2,7 @@
   "name": "servicex-vscode-extension",
   "displayName": "ServiceX Helper",
   "description": "Manage ServiceX transform caches and jobs from VS Code",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "RogerJanusiak",
   "license": "BSD-3-Clause",
   "icon": "resources/icon.png",
