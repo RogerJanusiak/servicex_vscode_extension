@@ -18,6 +18,10 @@ import {
 
 const EXTENSION_ID = 'RogerJanusiak.servicex-vscode-extension';
 
+function assertSamePath(actual: string, expected: string): void {
+  assert.strictEqual(path.normalize(actual).toLowerCase(), path.normalize(expected).toLowerCase());
+}
+
 async function activateExtension(): Promise<void> {
   const ext = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(ext, `Extension ${EXTENSION_ID} not found - is it loaded in the test host?`);
@@ -565,7 +569,7 @@ suite('extension.ts - command handlers', () => {
 
       assert.ok(openFolderArgs, 'expected vscode.openFolder to have been invoked');
       const [uri, forceNewWindow] = openFolderArgs!;
-      assert.strictEqual((uri as vscode.Uri).fsPath, dataDir);
+      assertSamePath((uri as vscode.Uri).fsPath, dataDir);
       assert.strictEqual(forceNewWindow, true);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
@@ -644,7 +648,7 @@ suite('extension.ts - command handlers', () => {
 
       assert.ok(openFolderArgs, 'expected vscode.openFolder to have been invoked');
       const [uri, forceNewWindow] = openFolderArgs!;
-      assert.strictEqual((uri as vscode.Uri).fsPath, cachePath);
+      assertSamePath((uri as vscode.Uri).fsPath, cachePath);
       assert.strictEqual(forceNewWindow, true);
     } finally {
       fs.rmSync(cachePath, { recursive: true, force: true });
