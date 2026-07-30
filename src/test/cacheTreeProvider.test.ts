@@ -118,6 +118,22 @@ suite('cacheTreeProvider.ts - groupByTitle', () => {
     const descending = groupByTitle([manyOld, manyNew, few], 'files', 'desc');
     assert.deepStrictEqual(descending.map((g) => g.title), ['Many', 'Few']);
   });
+
+  test('sortBy "size" orders groups by their combined size on disk, not just the most recent entry', () => {
+    // "Spread"'s most recent entry alone (5 B) is smaller than "Single"'s
+    // only entry (25 B) - but its total across both entries (30 B) is
+    // larger. Group size must sum, unlike the "files"/"date" dimensions
+    // above which use only the most recent entry as a stand-in.
+    const spreadOld = makeEntry({ requestId: 'spread-old', title: 'Spread', sizeBytes: 25, submitTime: new Date(100) });
+    const spreadNew = makeEntry({ requestId: 'spread-new', title: 'Spread', sizeBytes: 5, submitTime: new Date(500) });
+    const single = makeEntry({ requestId: 'single', title: 'Single', sizeBytes: 25, submitTime: new Date(200) });
+
+    const descending = groupByTitle([spreadOld, spreadNew, single], 'size', 'desc');
+    assert.deepStrictEqual(descending.map((g) => g.title), ['Spread', 'Single']);
+
+    const ascending = groupByTitle([spreadOld, spreadNew, single], 'size', 'asc');
+    assert.deepStrictEqual(ascending.map((g) => g.title), ['Single', 'Spread']);
+  });
 });
 
 suite('cacheTreeProvider.ts - filterEntries', () => {
@@ -210,6 +226,14 @@ suite('cacheTreeProvider.ts - sortEntries', () => {
 
     assert.deepStrictEqual(sortEntries([few, many], 'files', 'desc').map((e) => e.requestId), ['many', 'few']);
     assert.deepStrictEqual(sortEntries([many, few], 'files', 'asc').map((e) => e.requestId), ['few', 'many']);
+  });
+
+  test('sorts by size on disk, largest-first (desc) and smallest-first (asc)', () => {
+    const small = makeEntry({ requestId: 'small', sizeBytes: 1024 });
+    const large = makeEntry({ requestId: 'large', sizeBytes: 1024 * 1024 });
+
+    assert.deepStrictEqual(sortEntries([small, large], 'size', 'desc').map((e) => e.requestId), ['large', 'small']);
+    assert.deepStrictEqual(sortEntries([large, small], 'size', 'asc').map((e) => e.requestId), ['small', 'large']);
   });
 
   test('does not mutate the input array', () => {
@@ -800,6 +824,57 @@ suite('cacheTreeProvider.ts - CacheTreeProvider backend/failure/date filters, so
     const roots = (await provider.getChildren()) as RequestItem[];
 
     assert.deepStrictEqual(roots.map((r) => r.entry.title), ['Zebra', 'Mango', 'Apple']);
+  });
+
+  test('setSort("size", ...) sorts by size on disk - summed per group when grouped, per-entry when flat', async () => {
+    const dirs = [
+      fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-sort-size-a1-')),
+      fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-sort-size-a2-')),
+      fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-sort-size-b1-')),
+    ];
+    try {
+      // GroupA: two requests totalling 40 B (15 + 25). GroupB: one request
+      // at 30 B - individually larger than either of GroupA's entries, but
+      // GroupA's combined total still wins the "largest first" sort.
+      fs.writeFileSync(path.join(dirs[0], 'f.root'), 'x'.repeat(15));
+      fs.writeFileSync(path.join(dirs[1], 'f.root'), 'x'.repeat(25));
+      fs.writeFileSync(path.join(dirs[2], 'f.root'), 'x'.repeat(30));
+
+      stubConfig();
+      stubCacheRecords([
+        { request_id: 'a1', title: 'GroupA', status: 'COMPLETE', data_dir: dirs[0] },
+        { request_id: 'a2', title: 'GroupA', status: 'COMPLETE', data_dir: dirs[1] },
+        { request_id: 'b1', title: 'GroupB', status: 'COMPLETE', data_dir: dirs[2] },
+      ]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          a1: fakeStatus({ requestId: 'a1', title: 'GroupA' }),
+          a2: fakeStatus({ requestId: 'a2', title: 'GroupA' }),
+          b1: fakeStatus({ requestId: 'b1', title: 'GroupB' }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      await provider.getChildren();
+
+      provider.setSort('size', 'desc');
+      const groupedRoots = (await provider.getChildren()) as TitleGroupItem[];
+      assert.deepStrictEqual(groupedRoots.map((g) => g.title), ['GroupA', 'GroupB']);
+
+      provider.setGroupingEnabled(false);
+      const flatRoots = (await provider.getChildren()) as RequestItem[];
+      assert.deepStrictEqual(
+        flatRoots.map((r) => r.entry.requestId),
+        ['b1', 'a2', 'a1']
+      );
+      // b1=30, a2=25, a1=15 individually - flat mode has no group to sum, so
+      // this order flips relative to the grouped assertion above, which is
+      // exactly the point: "size" means something different in each mode.
+    } finally {
+      for (const dir of dirs) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   test('setGroupingEnabled(false) renders a flat, title-labeled list instead of groups', async () => {

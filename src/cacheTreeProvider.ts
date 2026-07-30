@@ -38,7 +38,7 @@ export function formatBytes(bytes: number): string {
   return `${exponent === 0 ? value : value.toFixed(1)} ${units[exponent]}`;
 }
 
-export type SortBy = 'title' | 'date' | 'files';
+export type SortBy = 'title' | 'date' | 'files' | 'size';
 export type SortDirection = 'asc' | 'desc';
 export type FailureFilter = 'all' | 'withFailures' | 'withoutFailures';
 
@@ -87,10 +87,13 @@ function compareEntries(a: CacheEntry, b: CacheEntry, sortBy: SortBy): number {
   if (sortBy === 'files') {
     return a.files - b.files;
   }
+  if (sortBy === 'size') {
+    return a.sizeBytes - b.sizeBytes;
+  }
   return (a.submitTime?.getTime() ?? 0) - (b.submitTime?.getTime() ?? 0);
 }
 
-/** Sorts a flat list of entries by title (A→Z/Z→A), submit date, or total file count. */
+/** Sorts a flat list of entries by title (A→Z/Z→A), submit date, total file count, or size on disk. */
 export function sortEntries(entries: CacheEntry[], sortBy: SortBy, direction: SortDirection): CacheEntry[] {
   const sorted = [...entries];
   sorted.sort((a, b) => (direction === 'asc' ? compareEntries(a, b, sortBy) : compareEntries(b, a, sortBy)));
@@ -111,6 +114,11 @@ function formatDateTime(value?: Date): string {
   });
 }
 
+/** Combined size on disk of every entry in a group. */
+function groupSizeBytes(entries: CacheEntry[]): number {
+  return entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+}
+
 export class TitleGroupItem extends vscode.TreeItem {
   /**
    * @param entries Entries to display as children (and count in the badge) -
@@ -126,7 +134,7 @@ export class TitleGroupItem extends vscode.TreeItem {
     public readonly allEntries: CacheEntry[] = entries
   ) {
     super(title, vscode.TreeItemCollapsibleState.Expanded);
-    const totalSize = entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+    const totalSize = groupSizeBytes(entries);
     this.description =
       `${entries.length} request${entries.length === 1 ? '' : 's'}` +
       (totalSize > 0 ? ` · ${formatBytes(totalSize)}` : '');
@@ -494,9 +502,9 @@ async function fetchOneEntry(
 /**
  * Group entries with the same title together (entries within a group are
  * always ordered newest-first). Groups themselves are ordered by title, by
- * their most recent submit time, or by the most recent entry's total file
- * count, per `sortBy`/`direction`. Mirrors core._group_by_title in the Python
- * CLI when using the defaults.
+ * their most recent submit time, by the most recent entry's total file
+ * count, or by the group's combined size on disk, per `sortBy`/`direction`.
+ * Mirrors core._group_by_title in the Python CLI when using the defaults.
  */
 export function groupByTitle(
   entries: CacheEntry[],
@@ -519,7 +527,14 @@ export function groupByTitle(
   });
 
   groups.sort((a, b) => {
-    const cmp = compareEntries(a.groupEntries[0], b.groupEntries[0], sortBy);
+    // "size" sorts groups by their combined size on disk (matching the total
+    // shown in the group's badge) rather than a single representative entry
+    // - unlike date/files, per-request sizes in a group genuinely add up to
+    // something meaningful.
+    const cmp =
+      sortBy === 'size'
+        ? groupSizeBytes(a.groupEntries) - groupSizeBytes(b.groupEntries)
+        : compareEntries(a.groupEntries[0], b.groupEntries[0], sortBy);
     return direction === 'asc' ? cmp : -cmp;
   });
 

@@ -52,6 +52,8 @@ const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[
   { label: 'Date (Oldest First)', sortBy: 'date', direction: 'asc' },
   { label: 'Total Files (Most First)', sortBy: 'files', direction: 'desc' },
   { label: 'Total Files (Fewest First)', sortBy: 'files', direction: 'asc' },
+  { label: 'Total Size (Largest First)', sortBy: 'size', direction: 'desc' },
+  { label: 'Total Size (Smallest First)', sortBy: 'size', direction: 'asc' },
 ];
 
 export function activate(context: vscode.ExtensionContext) {

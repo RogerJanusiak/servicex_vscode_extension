@@ -363,7 +363,7 @@ suite('extension.ts - command handlers', () => {
     assert.ok(infoMessage?.includes('No cached transform requests to filter yet'));
   });
 
-  test('the Sort menu offers all six orderings and marks the current one', async () => {
+  test('the Sort menu offers all eight orderings and marks the current one', async () => {
     let captured: { label: string; description?: string }[] = [];
     stub(vscode.window, 'showQuickPick', async (items: unknown) => {
       captured = items as { label: string; description?: string }[];
@@ -381,6 +381,8 @@ suite('extension.ts - command handlers', () => {
         'Date (Oldest First)',
         'Total Files (Most First)',
         'Total Files (Fewest First)',
+        'Total Size (Largest First)',
+        'Total Size (Smallest First)',
       ]
     );
     // Teardown resets the shared provider to the default sort, so that is
