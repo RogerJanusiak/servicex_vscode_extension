@@ -8,6 +8,7 @@ import {
   submittedRecords,
   deleteCacheRecord,
   deleteAllForTitle,
+  directorySize,
 } from '../cacheDb';
 
 function mkTmpDir(): string {
@@ -158,5 +159,32 @@ suite('cacheDb.ts', () => {
       remaining.map((r) => r.request_id),
       ['other']
     );
+  });
+
+  test('directorySize returns 0 for a path that does not exist', () => {
+    assert.strictEqual(directorySize(path.join(cachePath, 'nope')), 0);
+  });
+
+  test('directorySize returns 0 for an empty directory', () => {
+    fs.mkdirSync(cachePath, { recursive: true });
+    assert.strictEqual(directorySize(cachePath), 0);
+  });
+
+  test('directorySize sums file sizes in a flat directory', () => {
+    fs.mkdirSync(cachePath, { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'a.root'), 'x'.repeat(100));
+    fs.writeFileSync(path.join(cachePath, 'b.root'), 'x'.repeat(250));
+
+    assert.strictEqual(directorySize(cachePath), 350);
+  });
+
+  test('directorySize recurses into nested subdirectories', () => {
+    const nested = path.join(cachePath, 'req-1', 'sub');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'top.root'), 'x'.repeat(10));
+    fs.writeFileSync(path.join(cachePath, 'req-1', 'mid.root'), 'x'.repeat(20));
+    fs.writeFileSync(path.join(nested, 'deep.root'), 'x'.repeat(30));
+
+    assert.strictEqual(directorySize(cachePath), 60);
   });
 });

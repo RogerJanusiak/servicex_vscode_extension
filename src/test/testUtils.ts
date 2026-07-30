@@ -45,6 +45,7 @@ export function makeEntry(overrides: Partial<CacheEntry> = {}): CacheEntry {
     filesCompleted: 1,
     filesFailed: 0,
     stale: false,
+    sizeBytes: 0,
     ...overrides,
   };
 }

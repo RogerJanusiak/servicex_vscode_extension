@@ -86,3 +86,34 @@ export function deleteAllForTitle(cachePath: string, title: string): number {
   }
   return count;
 }
+
+/**
+ * Total size in bytes of every regular file under `dirPath`, recursively.
+ * Returns 0 for a path that doesn't exist (e.g. a SUBMITTED request with no
+ * data_dir yet, or a cache directory that hasn't been created). Skips
+ * entries that vanish mid-walk (e.g. a concurrent delete) rather than
+ * throwing.
+ */
+export function directorySize(dirPath: string): number {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+
+  let total = 0;
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += directorySize(fullPath);
+    } else if (entry.isFile()) {
+      try {
+        total += fs.statSync(fullPath).size;
+      } catch {
+        // Raced with a concurrent delete - just skip it.
+      }
+    }
+  }
+  return total;
+}

@@ -4,12 +4,13 @@ import {
   RequestItem,
   TitleGroupItem,
   computeCleanPlan,
+  formatBytes,
   FailureFilter,
   SortBy,
   SortDirection,
 } from './cacheTreeProvider';
 import { loadConfig, ServiceXConfig } from './config';
-import { deleteCacheRecord, deleteAllForTitle } from './cacheDb';
+import { deleteCacheRecord, deleteAllForTitle, directorySize } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
 
 function resolveConfig(): ServiceXConfig {
@@ -39,6 +40,20 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(treeView);
   vscode.commands.executeCommand('setContext', 'servicex.groupingEnabled', true);
 
+  /** Shows the total size of everything currently on disk under the cache
+   *  path, as a badge next to the view title - always visible, independent
+   *  of whatever filter is active. Recomputed straight from disk (not the
+   *  provider's fetched entries) so it stays accurate after a delete even
+   *  when the tree hasn't been re-fetched yet. */
+  const updateCacheSizeLabel = () => {
+    try {
+      treeView.description = formatBytes(directorySize(resolveConfig().cachePath));
+    } catch {
+      treeView.description = undefined;
+    }
+  };
+  updateCacheSizeLabel();
+
   const updateFilterMessage = () => {
     if (!cacheTreeProvider.hasActiveFilter()) {
       treeView.message = undefined;
@@ -67,7 +82,10 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('servicex.refreshCache', () => cacheTreeProvider.refresh())
+    vscode.commands.registerCommand('servicex.refreshCache', () => {
+      cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
+    })
   );
 
   context.subscriptions.push(
@@ -215,6 +233,7 @@ export function activate(context: vscode.ExtensionContext) {
           : `No cached files found for ${item.entry.requestId}.`
       );
       cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
     })
   );
 
@@ -251,6 +270,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
       vscode.window.showInformationMessage(`Deleted ${count} cached request(s) for '${item.title}'.`);
       cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
     })
   );
 
@@ -320,6 +340,7 @@ export function activate(context: vscode.ExtensionContext) {
       const count = deleteAllForTitle(resolveCachePath(), item.title);
       vscode.window.showInformationMessage(`Deleted ${count} cached request(s) for '${item.title}'.`);
       cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
     })
   );
 }

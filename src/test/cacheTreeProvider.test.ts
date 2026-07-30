@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import {
   CacheTreeProvider,
@@ -7,6 +10,7 @@ import {
   TitleGroupItem,
   computeCleanPlan,
   filterEntries,
+  formatBytes,
   groupByTitle,
   sortEntries,
 } from '../cacheTreeProvider';
@@ -219,6 +223,35 @@ suite('cacheTreeProvider.ts - sortEntries', () => {
   });
 });
 
+suite('cacheTreeProvider.ts - formatBytes', () => {
+  test('formats zero and sub-byte inputs as "0 B"', () => {
+    assert.strictEqual(formatBytes(0), '0 B');
+    assert.strictEqual(formatBytes(-5), '0 B');
+  });
+
+  test('formats bytes with no decimal place', () => {
+    assert.strictEqual(formatBytes(1), '1 B');
+    assert.strictEqual(formatBytes(512), '512 B');
+    assert.strictEqual(formatBytes(1023), '1023 B');
+  });
+
+  test('switches to KB at 1024 bytes, with one decimal place', () => {
+    assert.strictEqual(formatBytes(1024), '1.0 KB');
+    assert.strictEqual(formatBytes(1536), '1.5 KB');
+  });
+
+  test('switches to MB and GB at the right powers of 1024', () => {
+    assert.strictEqual(formatBytes(1024 * 1024), '1.0 MB');
+    assert.strictEqual(formatBytes(128.4 * 1024 * 1024), '128.4 MB');
+    assert.strictEqual(formatBytes(1024 * 1024 * 1024), '1.0 GB');
+  });
+
+  test('caps out at TB rather than inventing a larger unit', () => {
+    assert.strictEqual(formatBytes(1024 ** 4), '1.0 TB');
+    assert.strictEqual(formatBytes(1024 ** 5), '1024.0 TB');
+  });
+});
+
 suite('cacheTreeProvider.ts - TreeItem rendering', () => {
   test('TitleGroupItem shows a request count and the right contextValue', () => {
     const item = new TitleGroupItem('MyTitle', [makeEntry(), makeEntry()]);
@@ -232,6 +265,17 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
   test('TitleGroupItem uses singular wording for exactly one request', () => {
     const item = new TitleGroupItem('MyTitle', [makeEntry()]);
     assert.strictEqual(item.description, '1 request');
+  });
+
+  test('TitleGroupItem appends the total size on disk when any entry has one', () => {
+    const withSize = new TitleGroupItem('MyTitle', [
+      makeEntry({ requestId: 'a', sizeBytes: 1024 }),
+      makeEntry({ requestId: 'b', sizeBytes: 512 }),
+    ]);
+    assert.strictEqual(withSize.description, '2 requests · 1.5 KB');
+
+    const withoutSize = new TitleGroupItem('MyTitle', [makeEntry({ sizeBytes: 0 })]);
+    assert.strictEqual(withoutSize.description, '1 request');
   });
 
   test('RequestItem shows file counts, no backend/stale marker for a normal entry', () => {
@@ -270,6 +314,16 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
 
     assert.ok(withFiles.tooltip?.toString().includes('Downloaded files: 2'));
     assert.ok(!withoutFiles.tooltip?.toString().includes('Downloaded files'));
+  });
+
+  test('RequestItem shows size on disk in description and tooltip only when something has downloaded', () => {
+    const withSize = new RequestItem(makeEntry({ sizeBytes: 1024 * 1024 }));
+    assert.ok(withSize.description?.toString().includes('1.0 MB'));
+    assert.ok(withSize.tooltip?.toString().includes('Size on disk: 1.0 MB'));
+
+    const withoutSize = new RequestItem(makeEntry({ sizeBytes: 0 }));
+    assert.ok(!withoutSize.description?.toString().includes('B'));
+    assert.ok(!withoutSize.tooltip?.toString().includes('Size on disk'));
   });
 
   test('MessageItem carries only a label, optionally with an icon', () => {
@@ -406,6 +460,38 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
 
     assert.strictEqual(entries[0].entry.stale, true);
     assert.strictEqual(entries[0].entry.status, 'Not found on any backend');
+  });
+
+  test("computes an entry's sizeBytes from its data_dir on disk, and 0 when it has none", async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-size-test-'));
+    try {
+      fs.writeFileSync(path.join(dataDir, 'file1.root'), 'x'.repeat(1024));
+      fs.writeFileSync(path.join(dataDir, 'file2.root'), 'x'.repeat(2048));
+
+      stubConfig();
+      stubCacheRecords([
+        { request_id: 'downloaded', title: 'A', status: 'COMPLETE', data_dir: dataDir },
+        { request_id: 'submitted', title: 'B', status: 'SUBMITTED' },
+      ]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          downloaded: fakeStatus({ requestId: 'downloaded', title: 'A' }),
+          submitted: fakeStatus({ requestId: 'submitted', title: 'B', status: 'Running' }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const allEntries = (await Promise.all(roots.map((r) => provider.getChildren(r))))
+        .flat()
+        .map((n) => (n as RequestItem).entry);
+      const byId = new Map(allEntries.map((e) => [e.requestId, e]));
+
+      assert.strictEqual(byId.get('downloaded')?.sizeBytes, 3072);
+      assert.strictEqual(byId.get('submitted')?.sizeBytes, 0);
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   test('surfaces a non-NotFound backend error directly instead of trying other backends', async () => {

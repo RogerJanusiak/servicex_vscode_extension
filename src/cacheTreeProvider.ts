@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { loadConfig, orderedEndpoints } from './config';
 import { ServiceXApi, NotFoundError } from './serviceXApi';
-import { readCacheRecords, completedRecords, submittedRecords, CacheDbRecord } from './cacheDb';
+import { readCacheRecords, completedRecords, submittedRecords, directorySize, CacheDbRecord } from './cacheDb';
 
 export interface CacheEntry {
   requestId: string;
@@ -19,6 +19,20 @@ export interface CacheEntry {
   /** Locally downloaded file paths for this request, from the local cache
    *  record - undefined/empty if nothing has been downloaded yet. */
   fileList?: string[];
+  /** Size on disk of this request's downloaded files, in bytes - 0 if
+   *  nothing has been downloaded yet (e.g. still SUBMITTED). */
+  sizeBytes: number;
+}
+
+/** Formats a byte count as a human-readable size, e.g. "512 B", "1.5 KB", "128.4 MB". */
+export function formatBytes(bytes: number): string {
+  if (bytes <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, exponent);
+  return `${exponent === 0 ? value : value.toFixed(1)} ${units[exponent]}`;
 }
 
 export type SortBy = 'title' | 'date' | 'files';
@@ -109,7 +123,10 @@ export class TitleGroupItem extends vscode.TreeItem {
     public readonly allEntries: CacheEntry[] = entries
   ) {
     super(title, vscode.TreeItemCollapsibleState.Expanded);
-    this.description = `${entries.length} request${entries.length === 1 ? '' : 's'}`;
+    const totalSize = entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+    this.description =
+      `${entries.length} request${entries.length === 1 ? '' : 's'}` +
+      (totalSize > 0 ? ` · ${formatBytes(totalSize)}` : '');
     this.contextValue = 'servicexTitleGroup';
   }
 }
@@ -156,6 +173,7 @@ export class RequestItem extends vscode.TreeItem {
       (options?.showTitle ? `${entry.title} · ` : '') +
       `${formatDateTime(entry.submitTime)} → ${formatDateTime(entry.finishTime)} · ` +
       `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}` +
+      (entry.sizeBytes > 0 ? ` · ${formatBytes(entry.sizeBytes)}` : '') +
       (showBackend ? ` · via ${entry.backend}` : '');
     this.tooltip = [
       `Title: ${entry.title}`,
@@ -168,6 +186,7 @@ export class RequestItem extends vscode.TreeItem {
       `Files Total: ${entry.files}`,
       ...(entry.backend ? [`Backend: ${entry.backend}`] : []),
       ...(entry.fileList?.length ? [`Downloaded files: ${entry.fileList.length}`] : []),
+      ...(entry.sizeBytes > 0 ? [`Size on disk: ${formatBytes(entry.sizeBytes)}`] : []),
     ].join('\n');
     if (entry.stale) {
       this.iconPath = new vscode.ThemeIcon('warning');
@@ -402,6 +421,11 @@ function localFileList(local: CacheDbRecord): string[] | undefined {
   return Array.isArray(local.file_list) ? (local.file_list as string[]) : undefined;
 }
 
+/** Size on disk of a request's downloaded files - 0 for a SUBMITTED record, which has no data_dir yet. */
+function localSizeBytes(local: CacheDbRecord): number {
+  return typeof local.data_dir === 'string' ? directorySize(local.data_dir) : 0;
+}
+
 async function fetchOneEntry(
   apis: { name: string; api: ServiceXApi }[],
   requestId: string,
@@ -424,6 +448,7 @@ async function fetchOneEntry(
         stale: false,
         backend: name,
         fileList: localFileList(local),
+        sizeBytes: localSizeBytes(local),
       };
     } catch (e) {
       lastError = e;
@@ -451,6 +476,7 @@ async function fetchOneEntry(
     filesFailed: 0,
     stale: true,
     fileList: localFileList(local),
+    sizeBytes: localSizeBytes(local),
   };
 }
 

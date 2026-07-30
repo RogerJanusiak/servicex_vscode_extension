@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
 import { RequestItem, TitleGroupItem } from '../cacheTreeProvider';
 import {
@@ -17,7 +18,16 @@ const EXTENSION_ID = 'RogerJanusiak.servicex-vscode-extension';
 async function activateExtension(): Promise<void> {
   const ext = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(ext, `Extension ${EXTENSION_ID} not found - is it loaded in the test host?`);
+  // activate() eagerly computes the cache-size badge once at startup, before
+  // any per-test stub exists. Stub loadConfig for that one moment so it
+  // can't wander off and read whatever real .servicex/servicex.yaml happens
+  // to be findable on the host machine - activation itself must stay
+  // hermetic, same as every other test in this file.
+  stub(configModule, 'loadConfig', () => {
+    throw new Error('no config in test activation');
+  });
   await ext!.activate();
+  restoreStubs();
 }
 
 /** Stubs the fetch pipeline with two backends and two requests (one Fatal with
