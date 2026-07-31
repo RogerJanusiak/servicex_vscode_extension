@@ -49,7 +49,7 @@ suite('cacheDb.ts', () => {
   });
 
   test('readCacheRecords returns [] when there is no db.json yet', () => {
-    assert.deepStrictEqual(readCacheRecords(cachePath), []);
+    assert.deepStrictEqual(readCacheRecords(cachePath), { records: [], corrupted: 0 });
   });
 
   test('readCacheRecords reads every record out of the default table', () => {
@@ -58,13 +58,53 @@ suite('cacheDb.ts', () => {
       '2': { request_id: 'b', title: 'B', status: 'SUBMITTED' },
     });
 
-    const records = readCacheRecords(cachePath);
+    const { records, corrupted } = readCacheRecords(cachePath);
 
+    assert.strictEqual(corrupted, 0);
     assert.strictEqual(records.length, 2);
     assert.deepStrictEqual(
       records.map((r) => r.request_id).sort(),
       ['a', 'b']
     );
+  });
+
+  test('readCacheRecords recovers the intact records when db.json is truncated mid-write', () => {
+    fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+    const full = JSON.stringify({
+      _default: {
+        '1': { request_id: 'a', title: 'A', status: 'COMPLETE' },
+        '2': { request_id: 'b', title: 'B', status: 'COMPLETE' },
+        '3': { request_id: 'c', title: 'C', status: 'COMPLETE' },
+      },
+    });
+    // Simulate a process killed partway through writing the last record.
+    const cut = full.slice(0, full.lastIndexOf('"c"') + 3);
+    fs.writeFileSync(path.join(cachePath, '.servicex', 'db.json'), cut);
+
+    const { records, corrupted } = readCacheRecords(cachePath);
+
+    assert.strictEqual(corrupted, 1);
+    assert.deepStrictEqual(
+      records.map((r) => r.request_id).sort(),
+      ['a', 'b']
+    );
+  });
+
+  test('readCacheRecords returns everything recoverable even when nothing is fully intact', () => {
+    fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+    fs.writeFileSync(path.join(cachePath, '.servicex', 'db.json'), '{"_default": {"1": {"request');
+
+    const { records, corrupted } = readCacheRecords(cachePath);
+
+    assert.deepStrictEqual(records, []);
+    assert.strictEqual(corrupted, 1);
+  });
+
+  test('readCacheRecords treats an empty db.json as an empty cache, not corruption', () => {
+    fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+    fs.writeFileSync(path.join(cachePath, '.servicex', 'db.json'), '');
+
+    assert.deepStrictEqual(readCacheRecords(cachePath), { records: [], corrupted: 0 });
   });
 
   test('completedRecords excludes SUBMITTED records', () => {
@@ -106,7 +146,7 @@ suite('cacheDb.ts', () => {
     assert.strictEqual(fs.existsSync(dirA), false);
     assert.strictEqual(fs.existsSync(dirB), true);
 
-    const remaining = readCacheRecords(cachePath);
+    const remaining = readCacheRecords(cachePath).records;
     assert.deepStrictEqual(
       remaining.map((r) => r.request_id),
       ['req-b']
@@ -121,7 +161,7 @@ suite('cacheDb.ts', () => {
     const deleted = deleteCacheRecord(cachePath, 'req-a');
 
     assert.strictEqual(deleted, true);
-    assert.deepStrictEqual(readCacheRecords(cachePath), []);
+    assert.deepStrictEqual(readCacheRecords(cachePath), { records: [], corrupted: 0 });
   });
 
   test('deleteCacheRecord returns false when the request is not cached', () => {
@@ -154,7 +194,7 @@ suite('cacheDb.ts', () => {
     assert.strictEqual(fs.existsSync(dirNew), false);
     assert.strictEqual(fs.existsSync(dirOther), true);
 
-    const remaining = readCacheRecords(cachePath);
+    const remaining = readCacheRecords(cachePath).records;
     assert.deepStrictEqual(
       remaining.map((r) => r.request_id),
       ['other']

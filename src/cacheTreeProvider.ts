@@ -463,7 +463,14 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       api: new ServiceXApi(e.endpoint, e.token),
     }));
 
-    const records = readCacheRecords(config.cachePath);
+    const { records, corrupted } = readCacheRecords(config.cachePath);
+    if (corrupted > 0) {
+      vscode.window.showWarningMessage(
+        `ServiceX: ${corrupted} ${corrupted === 1 ? 'entry' : 'entries'} in the local cache database ` +
+          `(db.json) could not be read and ${corrupted === 1 ? 'was' : 'were'} skipped. The rest of the ` +
+          'cache loaded normally.'
+      );
+    }
     const localByRequestId = new Map<string, CacheDbRecord>();
     for (const r of [...completedRecords(records), ...submittedRecords(records)]) {
       if (r.request_id) {

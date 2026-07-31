@@ -2,6 +2,7 @@
 .vscode-test/**
 .vscode-test.mjs
 .github/**
+coverage/**
 src/**
 out/test/**
 .gitignore

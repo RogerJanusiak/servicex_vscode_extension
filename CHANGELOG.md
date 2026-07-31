@@ -2,6 +2,30 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [0.4.1] - 2026-07-31
+
+### Added
+
+- Published to [Open VSX](https://open-vsx.org) in addition to the VS Code
+  Marketplace, so editors that don't use the Microsoft Marketplace
+  (VSCodium, code-server, Coder, Theia, Gitpod, and similar) can install it
+  directly from their extensions panel.
+
+### Fixed
+
+- A cache path that resolves to the servicex Python client's default
+  `/tmp/servicex_$USER` (or any other `tmp`-rooted path) is now rehomed
+  under the OS temp directory the same way the Python client does. This was
+  the cause of the cache always appearing empty on Windows, where no literal
+  `/tmp` exists.
+- A corrupted local cache database (`db.json`) - e.g. left truncated by a
+  process killed mid-write - no longer wipes out the whole Cached Transforms
+  view. Every record that's still intact loads normally; only the genuinely
+  unreadable ones are skipped, with a warning instead of an error.
+- An empty `db.json` (a fresh cache that hasn't been written to yet) is no
+  longer mistaken for a corrupted one.
+- Packaged `.vsix` no longer bundles the `coverage/` test-report folder.
+
 ## [0.4.0] - 2026-07-30
 
 ### Added

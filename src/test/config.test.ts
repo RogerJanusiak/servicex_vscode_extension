@@ -140,6 +140,58 @@ suite('config.ts', () => {
     assert.strictEqual(config.cachePath, path.join(os.homedir(), `servicex-test-${os.userInfo().username}`));
   });
 
+  test('loadConfig rehomes the default cache_path under the OS temp directory', () => {
+    // No cache-path key at all - the servicex Python client's own default,
+    // "/tmp/servicex_${USER}", applies. On POSIX the real tmpdir usually is
+    // /tmp, so this looks like a no-op there; on Windows there is no literal
+    // "/tmp", and the Python client actually creates its cache under
+    // %TEMP%\servicex_<user> - reproducing that is what makes the extension
+    // look at the same db.json the Python client wrote.
+    fs.writeFileSync(
+      path.join(root, 'servicex.yaml'),
+      'api_endpoints:\n  - name: alpha\n    endpoint: https://alpha.example.org\n'
+    );
+
+    const config = loadConfig(undefined, root);
+
+    assert.strictEqual(config.cachePath, path.join(os.tmpdir(), `servicex_${os.userInfo().username}`));
+  });
+
+  test('loadConfig rehomes an explicit cache_path under /tmp the same way', () => {
+    fs.writeFileSync(
+      path.join(root, 'servicex.yaml'),
+      'api_endpoints:\n  - name: alpha\n    endpoint: https://alpha.example.org\ncache-path: /tmp/my-cache\n'
+    );
+
+    const config = loadConfig(undefined, root);
+
+    assert.strictEqual(config.cachePath, path.join(os.tmpdir(), 'my-cache'));
+  });
+
+  test("loadConfig leaves a cache_path alone when its first segment past the root isn't tmp", () => {
+    const cachePath = path.join(root, 'cache');
+    writeConfig(root, cachePath);
+
+    const config = loadConfig(undefined, root);
+
+    assert.strictEqual(config.cachePath, cachePath);
+  });
+
+  test('loadConfig only rehomes a relative cache_path when "tmp" is its second segment, matching PurePath', () => {
+    // Python indexes PurePath(p).parts[1] unconditionally - for a relative
+    // path, parts[0] is a real segment rather than a root marker, so it's
+    // the *second* component that has to read "tmp", not the first. A
+    // relative path starting with "tmp/..." is left untouched.
+    fs.writeFileSync(
+      path.join(root, 'servicex.yaml'),
+      'api_endpoints:\n  - name: alpha\n    endpoint: https://alpha.example.org\ncache-path: relative/tmp/x\n'
+    );
+
+    const config = loadConfig(undefined, root);
+
+    assert.strictEqual(config.cachePath, path.join(os.tmpdir(), 'x'));
+  });
+
   test('selectEndpoint picks the explicitly requested backend', () => {
     writeConfig(root, path.join(root, 'cache'));
     const config = loadConfig(undefined, root);

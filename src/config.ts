@@ -55,6 +55,50 @@ function findConfigFile(startDir: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Split `p` into its root (a drive letter like `C:`, a bare POSIX-style `/`,
+ * or undefined for a relative path) and its remaining segments - the pieces
+ * `remapTmpSegment` needs to reproduce Python's `PurePath(p).parts`, which
+ * treats a leading `/` as its own part distinct from what follows it
+ * regardless of platform.
+ */
+function splitRoot(p: string): { root: string | undefined; segments: string[] } {
+  const drive = /^([A-Za-z]:)[\\/]/.exec(p);
+  if (drive) {
+    return { root: drive[1], segments: p.slice(drive[0].length).split(/[\\/]+/).filter(Boolean) };
+  }
+  if (/^[\\/]/.test(p)) {
+    return { root: '/', segments: p.replace(/^[\\/]+/, '').split(/[\\/]+/).filter(Boolean) };
+  }
+  return { root: undefined, segments: p.split(/[\\/]+/).filter(Boolean) };
+}
+
+/**
+ * Mirrors `Configuration.expand_cache_path` in the servicex Python client:
+ * a path whose first segment past the root is literally `tmp` gets rehomed
+ * under the OS temp directory instead of being treated as a literal path.
+ *
+ * The client's default cache-path is `/tmp/servicex_${USER}` on every
+ * platform. On POSIX that's a no-op - the real tmpdir usually is `/tmp` -
+ * but on Windows there is no such literal path, so the client actually
+ * creates (and later reads) its cache under `%TEMP%\servicex_<user>`. Without
+ * this remap the extension computes a cache path the Python client never
+ * wrote to, so every request looks uncached - this is the whole reason a
+ * fresh Windows install can show "No cached transform requests found" for a
+ * user who has plenty of requests.
+ */
+function remapTmpSegment(p: string): string {
+  const { root, segments } = splitRoot(p);
+  // Python indexes `parts[1]` unconditionally: for an absolute path that's
+  // the first segment past the root; for a relative path `parts[0]` is
+  // itself a real segment, so it's the *second* one that has to be "tmp".
+  const tmpIndex = root === undefined ? 1 : 0;
+  if (segments[tmpIndex] !== 'tmp') {
+    return p;
+  }
+  return path.join(os.tmpdir(), ...segments.slice(tmpIndex + 1));
+}
+
 function expandCachePath(rawPath: string | undefined): string {
   const username = os.userInfo().username;
   let p = rawPath ?? `/tmp/servicex_\${USER}`;
@@ -62,7 +106,7 @@ function expandCachePath(rawPath: string | undefined): string {
   if (p.startsWith('~')) {
     p = path.join(os.homedir(), p.slice(1));
   }
-  return p;
+  return remapTmpSegment(p);
 }
 
 export function loadConfig(explicitConfigPath?: string, startDir?: string): ServiceXConfig {

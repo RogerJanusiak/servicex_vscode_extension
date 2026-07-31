@@ -73,9 +73,11 @@ export function stubConfig(endpoints: EndpointConfig[] = [DEFAULT_ENDPOINT]): vo
   }));
 }
 
-/** Stubs readCacheRecords to return fixed records (or delegate to a function for call-counting). */
+/** Stubs readCacheRecords to return fixed records (or delegate to a function for call-counting),
+ *  wrapped in the { records, corrupted: 0 } shape the real function returns. */
 export function stubCacheRecords(records: CacheDbRecord[] | (() => CacheDbRecord[])): void {
-  stub(cacheDbModule, 'readCacheRecords', typeof records === 'function' ? records : () => records);
+  const getRecords = typeof records === 'function' ? records : () => records;
+  stub(cacheDbModule, 'readCacheRecords', () => ({ records: getRecords(), corrupted: 0 }));
 }
 
 /** Fakes just enough of ServiceXApi to drive CacheTreeProvider.getChildren()
