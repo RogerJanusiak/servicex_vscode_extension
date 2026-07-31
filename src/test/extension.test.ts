@@ -106,6 +106,7 @@ suite('extension.ts - activation', () => {
       'servicex.deleteGroup',
       'servicex.copyRequestId',
       'servicex.copyFileList',
+      'servicex.showQuery',
       'servicex.openDashboard',
       'servicex.openCacheFolder',
       'servicex.openCacheRootFolder',
@@ -653,5 +654,136 @@ suite('extension.ts - command handlers', () => {
     } finally {
       fs.rmSync(cachePath, { recursive: true, force: true });
     }
+  });
+});
+
+suite('extension.ts - servicex.showQuery', () => {
+  suiteSetup(activateExtension);
+  teardown(restoreStubs);
+
+  const PYTHON_QUERY = 'def run_query(input_filenames=None):\n    return {"met": []}';
+
+  /** Captures what the command would have opened, without leaving editors
+   *  behind in the shared test window. */
+  function captureOpenedDocument(): { value?: { content: string; language: string } } {
+    const captured: { value?: { content: string; language: string } } = {};
+    stub(vscode.workspace, 'openTextDocument', async (options: unknown) => {
+      captured.value = options as { content: string; language: string };
+      return {} as vscode.TextDocument;
+    });
+    stub(vscode.window, 'showTextDocument', async () => undefined);
+    return captured;
+  }
+
+  /** Points the one configured backend at a transform with `selection`. */
+  function stubSelection(selection: string, overrides: Record<string, unknown> = {}): void {
+    stubConfig();
+    stubServiceXApi({
+      'https://default.example.org': {
+        'req-1': fakeStatus({ requestId: 'req-1', selection, ...overrides }),
+      },
+    });
+  }
+
+  test('opens the decoded query for an uproot-raw request, headed by its provenance', async () => {
+    stubSelection('[{"treename":"Events","filter_name":["MET_pt"]}]', {
+      did: 'rucio://mc23_13p6TeV.601229',
+      resultFormat: 'root-ttree',
+    });
+    const captured = captureOpenedDocument();
+
+    const item = new RequestItem(
+      makeEntry({ requestId: 'req-1', title: 'My Sample', backend: 'default', codegen: 'uproot-raw' })
+    );
+    await vscode.commands.executeCommand('servicex.showQuery', item);
+
+    assert.ok(captured.value, 'expected a document to have been opened');
+    // JSON gets // comments so the whole document stays valid jsonc.
+    assert.strictEqual(captured.value!.language, 'jsonc');
+    assert.ok(captured.value!.content.startsWith('// Request: req-1\n'), captured.value!.content);
+    assert.ok(captured.value!.content.includes('// Title:   My Sample'));
+    assert.ok(captured.value!.content.includes('// Backend: default'));
+    assert.ok(captured.value!.content.includes('// Codegen: uproot-raw'));
+    assert.ok(captured.value!.content.includes('// Dataset: rucio://mc23_13p6TeV.601229'));
+    assert.ok(captured.value!.content.includes('"treename": "Events"'));
+  });
+
+  test('recovers the literal source of a python-function request', async () => {
+    stubSelection(Buffer.from(PYTHON_QUERY).toString('base64'));
+    const captured = captureOpenedDocument();
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', codegen: 'python' }));
+    await vscode.commands.executeCommand('servicex.showQuery', item);
+
+    assert.strictEqual(captured.value?.language, 'python');
+    assert.ok(captured.value!.content.endsWith(`${PYTHON_QUERY}\n`), captured.value!.content);
+  });
+
+  test('shows a selection it cannot decode as-is rather than failing', async () => {
+    stubSelection('this is not any selection encoding');
+    const captured = captureOpenedDocument();
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default' }));
+    await vscode.commands.executeCommand('servicex.showQuery', item);
+
+    assert.strictEqual(captured.value?.language, 'plaintext');
+    assert.ok(captured.value!.content.endsWith('this is not any selection encoding\n'));
+    assert.ok(captured.value!.content.includes("didn't match any encoding"));
+  });
+
+  test('shows an info message when the backend returns no selection', async () => {
+    stubSelection('   ');
+    const captured = captureOpenedDocument();
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default' }));
+    await vscode.commands.executeCommand('servicex.showQuery', item);
+
+    assert.strictEqual(captured.value, undefined);
+    assert.ok(infoMessage?.includes("didn't return a query for req-1"), infoMessage);
+  });
+
+  test('shows an info message instead when the entry has no known backend', async () => {
+    stubConfig();
+    const captured = captureOpenedDocument();
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-stale', backend: undefined }));
+    await vscode.commands.executeCommand('servicex.showQuery', item);
+
+    assert.strictEqual(captured.value, undefined);
+    assert.ok(infoMessage?.includes("Can't show the query for req-stale"), infoMessage);
+  });
+
+  test('reports a failed fetch as an error instead of opening an empty document', async () => {
+    stubConfig();
+    stubServiceXApi({ 'https://default.example.org': { 'req-1': new Error('ServiceX WebAPI error 500') } });
+    const captured = captureOpenedDocument();
+    let errorMessage: string | undefined;
+    stub(vscode.window, 'showErrorMessage', (msg: string) => {
+      errorMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default' }));
+    await vscode.commands.executeCommand('servicex.showQuery', item);
+
+    assert.strictEqual(captured.value, undefined);
+    assert.ok(errorMessage?.includes("Couldn't fetch the query for req-1"), errorMessage);
+    assert.ok(errorMessage?.includes('ServiceX WebAPI error 500'), errorMessage);
+  });
+
+  test('ships the qastle decoder the command shells out to', () => {
+    const extensionPath = vscode.extensions.getExtension(EXTENSION_ID)!.extensionPath;
+
+    assert.ok(fs.existsSync(path.join(extensionPath, 'resources', 'decode_qastle.py')));
   });
 });

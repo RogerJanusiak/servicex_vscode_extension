@@ -2,6 +2,25 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Show Query**: a per-request right-click action that opens the query the
+  transform was submitted with in a scratch editor. The query isn't kept in
+  the local cache, so it's fetched from the backend as the transform's
+  `selection` string and decoded: JSON (uproot-raw, TopCP) and base64'd
+  Python function sources come back exactly, and func_adl queries are turned
+  back into equivalent func_adl source from their qastle, with the generated
+  `MetaData(...)` wrappers removed and the result formatted over several
+  lines (via `black` when it's installed).
+- `servicex.pythonPath` setting, naming the interpreter used to decode
+  func_adl queries. Defaults to the Python extension's selected interpreter,
+  then `python3`/`python` from `PATH`; when none of them has the `qastle`
+  package, the raw qastle is shown indented instead, with a note saying why.
+- `servicex.showQueryMetadata` setting, to keep the generated `MetaData(...)`
+  wrappers in the query instead of dropping them.
+
 ## [0.2.0] - 2026-07-29
 
 ### Added

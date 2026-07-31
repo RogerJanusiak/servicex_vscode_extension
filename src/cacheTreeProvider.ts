@@ -25,6 +25,11 @@ export interface CacheEntry {
   /** Local directory holding this request's downloaded files - undefined
    *  for a still-SUBMITTED request with nothing downloaded yet. */
   dataDir?: string;
+  /** Code generator this query was submitted with (e.g. "atlasr22",
+   *  "uproot-raw", "python"), from the local cache record - the backend's
+   *  transform status doesn't report it. Shown in the header of the query
+   *  document; undefined when there's no local record to read it from. */
+  codegen?: string;
 }
 
 /** Formats a byte count as a human-readable size, e.g. "512 B", "1.5 KB", "128.4 MB". */
@@ -481,6 +486,10 @@ function localDataDir(local: CacheDbRecord): string | undefined {
   return typeof local.data_dir === 'string' ? local.data_dir : undefined;
 }
 
+function localCodegen(local: CacheDbRecord): string | undefined {
+  return typeof local.codegen === 'string' ? local.codegen : undefined;
+}
+
 /** Size on disk of a request's downloaded files - 0 for a SUBMITTED record, which has no data_dir yet. */
 function localSizeBytes(local: CacheDbRecord): number {
   const dataDir = localDataDir(local);
@@ -511,6 +520,7 @@ async function fetchOneEntry(
         fileList: localFileList(local),
         sizeBytes: localSizeBytes(local),
         dataDir: localDataDir(local),
+        codegen: localCodegen(local),
       };
     } catch (e) {
       lastError = e;
@@ -540,6 +550,7 @@ async function fetchOneEntry(
     fileList: localFileList(local),
     sizeBytes: localSizeBytes(local),
     dataDir: localDataDir(local),
+    codegen: localCodegen(local),
   };
 }
 

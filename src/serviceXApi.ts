@@ -9,6 +9,12 @@ export interface TransformStatus {
   files: number;
   filesCompleted: number;
   filesFailed: number;
+  /** The query as ServiceX stored it - qastle, base64'd Python, or JSON,
+   *  depending on the query type. See queryDecoder.ts. Optional only
+   *  defensively: the WebAPI always returns it. */
+  selection?: string;
+  did?: string;
+  resultFormat?: string;
 }
 
 function decodeJwtExpiry(token: string): number {
@@ -29,6 +35,9 @@ function parseTransformStatus(o: any): TransformStatus {
     files: o.files ?? 0,
     filesCompleted: o['files-completed'] ?? 0,
     filesFailed: o['files-failed'] ?? 0,
+    selection: o.selection,
+    did: o.did,
+    resultFormat: o['result-format'],
   };
 }
 

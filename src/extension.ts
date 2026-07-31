@@ -1,6 +1,8 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import {
+  CacheEntry,
   CacheTreeProvider,
   RequestItem,
   TitleGroupItem,
@@ -10,9 +12,18 @@ import {
   SortBy,
   SortDirection,
 } from './cacheTreeProvider';
-import { loadConfig, ServiceXConfig } from './config';
+import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
 import { deleteCacheRecord, deleteAllForTitle, directorySize } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
+import { ServiceXApi } from './serviceXApi';
+import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
+import {
+  DecodedSelection,
+  classifySelection,
+  decodeSelection,
+  prettyPrintQastle,
+  renderQueryDocument,
+} from './queryDecoder';
 
 function resolveConfig(): ServiceXConfig {
   const settings = vscode.workspace.getConfiguration('servicex');
@@ -43,6 +54,61 @@ async function openFolderInNewWindow(targetPath: string): Promise<void> {
     ? vscode.Uri.from({ scheme: workspaceUri.scheme, authority: workspaceUri.authority, path: targetPath })
     : vscode.Uri.file(targetPath);
   await vscode.commands.executeCommand('vscode.openFolder', targetUri, true);
+}
+
+/**
+ * The configured endpoint a request was found on, or undefined (after
+ * explaining why in an info message) when there isn't one: a stale request
+ * that no backend recognized has none, and a backend the user has since
+ * renamed or dropped from servicex.yaml is no longer resolvable. `action`
+ * names what the user was trying to do, e.g. "open the dashboard".
+ */
+function endpointForRequest(entry: CacheEntry, action: string): EndpointConfig | undefined {
+  if (!entry.backend) {
+    vscode.window.showInformationMessage(
+      `Can't ${action} for ${entry.requestId} - its backend couldn't be determined.`
+    );
+    return undefined;
+  }
+  const endpoint = resolveConfig().endpoints.find((e) => e.name === entry.backend);
+  if (!endpoint) {
+    vscode.window.showInformationMessage(
+      `Can't ${action} for ${entry.requestId} - backend '${entry.backend}' is not configured.`
+    );
+    return undefined;
+  }
+  return endpoint;
+}
+
+/**
+ * Turn a raw `selection` into the document to show. Everything but qastle
+ * decodes in-process; qastle needs a Python interpreter with the qastle
+ * package, and falls back to the indented s-expression when there isn't one.
+ */
+async function decodeForDisplay(selection: string, scriptPath: string): Promise<DecodedSelection> {
+  if (classifySelection(selection) === 'qastle') {
+    const interpreters = await pythonInterpreterCandidates();
+    // func_adl's backend packages wrap the query in one MetaData(...) call
+    // per C++ type/method it touches - dozens of them, none hand-written.
+    // They're dropped unless the user asks to see them.
+    const keepMetadata = vscode.workspace.getConfiguration('servicex').get<boolean>('showQueryMetadata');
+    const { source, reason } = await decodeQastle(
+      selection,
+      scriptPath,
+      interpreters,
+      keepMetadata ? ['--metadata'] : []
+    );
+    return source
+      ? { kind: 'qastle', body: source, language: 'python' }
+      : { kind: 'qastle', body: prettyPrintQastle(selection), language: 'plaintext', warning: reason };
+  }
+  return (
+    decodeSelection(selection) ?? {
+      kind: 'unknown',
+      body: selection.trim(),
+      language: 'plaintext',
+    }
+  );
 }
 
 const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[] = [
@@ -336,21 +402,80 @@ export function activate(context: vscode.ExtensionContext) {
       if (!item) {
         return;
       }
-      if (!item.entry.backend) {
-        vscode.window.showInformationMessage(
-          `Can't open the dashboard for ${item.entry.requestId} - its backend couldn't be determined.`
-        );
-        return;
-      }
-      const endpoint = resolveConfig().endpoints.find((e) => e.name === item.entry.backend);
+      const endpoint = endpointForRequest(item.entry, 'open the dashboard');
       if (!endpoint) {
-        vscode.window.showInformationMessage(
-          `Can't open the dashboard for ${item.entry.requestId} - backend '${item.entry.backend}' is not configured.`
-        );
         return;
       }
       const url = `${endpoint.endpoint.replace(/\/+$/, '')}/transformation-request/${item.entry.requestId}`;
       await vscode.env.openExternal(vscode.Uri.parse(url));
+    })
+  );
+
+  /**
+   * Opens the query that produced a request, in a scratch editor. The query
+   * isn't in the local cache - db.json keeps only the hash it was reduced to
+   * - so it has to come back from the backend as the transform's `selection`
+   * string, then be decoded from whatever encoding its query type uses.
+   */
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.showQuery', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      const endpoint = endpointForRequest(item.entry, 'show the query');
+      if (!endpoint) {
+        return;
+      }
+
+      const scriptPath = path.join(context.extensionPath, 'resources', 'decode_qastle.py');
+      let rendered: { content: string; language: string } | undefined;
+      try {
+        rendered = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Fetching the query for ${item.entry.requestId}...`,
+          },
+          async () => {
+            const api = new ServiceXApi(endpoint.endpoint, endpoint.token);
+            const status = await api.getTransformStatus(item.entry.requestId);
+            if (!status.selection?.trim()) {
+              return undefined;
+            }
+            const decoded = await decodeForDisplay(status.selection, scriptPath);
+            return {
+              content: renderQueryDocument(
+                {
+                  requestId: item.entry.requestId,
+                  title: item.entry.title,
+                  backend: item.entry.backend,
+                  codegen: item.entry.codegen,
+                  did: status.did,
+                  resultFormat: status.resultFormat,
+                },
+                decoded
+              ),
+              language: decoded.language,
+            };
+          }
+        );
+      } catch (e) {
+        vscode.window.showErrorMessage(
+          `Couldn't fetch the query for ${item.entry.requestId}: ${(e as Error).message}`
+        );
+        return;
+      }
+
+      if (!rendered) {
+        vscode.window.showInformationMessage(
+          `${endpoint.name} didn't return a query for ${item.entry.requestId}.`
+        );
+        return;
+      }
+      const document = await vscode.workspace.openTextDocument({
+        content: rendered.content,
+        language: rendered.language,
+      });
+      await vscode.window.showTextDocument(document, { preview: false });
     })
   );
 
