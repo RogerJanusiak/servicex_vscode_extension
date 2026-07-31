@@ -33,3 +33,6 @@ jobs:
 
       - name: Publish to VS Code Marketplace
         run: npx vsce publish -p "${{ secrets.PublishPAT }}"
+
+      - name: Publish to Open VSX Registry
+        run: npx ovsx publish -p "${{ secrets.OpenVSXPAT }}"
