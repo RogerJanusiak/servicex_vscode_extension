@@ -12,9 +12,11 @@ import {
   RequestItem,
   TitleGroupItem,
   buildRequestDetails,
+  clearServiceXApiCache,
   computeCleanPlan,
   filterEntries,
   formatBytes,
+  getServiceXApi,
   groupByTitle,
   isTerminalStatus,
   sortEntries,
@@ -28,6 +30,8 @@ import {
   stubConfig,
   stubCacheRecords,
   stubServiceXApi,
+  StubServiceXApiOptions,
+  DEFAULT_ENDPOINT,
 } from './testUtils';
 
 suite('cacheTreeProvider.ts - computeCleanPlan', () => {
@@ -307,6 +311,27 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
     assert.strictEqual(withoutSize.description, '1 request');
   });
 
+  test('TitleGroupItem/BackendGroupItem/RequestItem carry a stable id so a soft refresh does not collapse them', () => {
+    // Two separately-constructed items for the same underlying data (e.g.
+    // one built before a refresh, one after) must produce the same id -
+    // that's what lets VS Code recognize them as "the same" node and keep
+    // it expanded across the periodic refresh the live-polling loop fires.
+    const entryA = makeEntry({ requestId: 'req-1', backend: 'uchicago' });
+    const entryB = makeEntry({ requestId: 'req-1', backend: 'uchicago', status: 'Running' });
+    assert.strictEqual(new RequestItem(entryA).id, new RequestItem(entryB).id);
+    assert.strictEqual(new RequestItem(entryA).id, 'request:req-1');
+
+    const group1 = new TitleGroupItem('MyTitle', [entryA]);
+    const group2 = new TitleGroupItem('MyTitle', [entryB]);
+    assert.strictEqual(group1.id, group2.id);
+    assert.strictEqual(group1.id, 'uchicago:MyTitle');
+
+    const backend1 = new BackendGroupItem('uchicago', [entryA]);
+    const backend2 = new BackendGroupItem('uchicago', [entryB], 'some error');
+    assert.strictEqual(backend1.id, backend2.id);
+    assert.strictEqual(backend1.id, 'backend:uchicago');
+  });
+
   test('RequestItem is collapsed by default, showing only status and dates - no files/size/backend', () => {
     const entry = makeEntry({
       status: 'Complete',
@@ -415,7 +440,7 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
     );
   });
 
-  test('buildRequestDetails shows a progress bar for a non-terminal status with a known file count', () => {
+  test('buildRequestDetails shows a progress bar driven by filesCompleted', () => {
     const details = buildRequestDetails(
       makeEntry({ status: 'Running', filesCompleted: 15, filesFailed: 0, files: 20 })
     );
@@ -427,6 +452,19 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
         'Files: Complete 15 · Failed 0 · Total 20',
         'Progress: ███████████████░░░░░ 75% (15/20 files)',
       ]
+    );
+  });
+
+  test('buildRequestDetails prefers downloadedFiles over filesCompleted for the progress bar', () => {
+    // filesCompleted (transformed server-side) and downloadedFiles (landed
+    // on local disk) deliberately disagree here: a cache-panel user is
+    // waiting on the download, so the bar must follow the latter.
+    const details = buildRequestDetails(
+      makeEntry({ status: 'Running', filesCompleted: 15, downloadedFiles: 5, files: 20 })
+    );
+
+    assert.ok(
+      details.some((d) => d.label === 'Progress: █████░░░░░░░░░░░░░░░ 25% (5/20 files downloaded)')
     );
   });
 
@@ -596,7 +634,7 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     assert.strictEqual(entries[0].entry.status, 'Not found on any backend');
   });
 
-  test("computes an entry's sizeBytes and dataDir from its local data_dir, and both are empty when it has none", async () => {
+  test("computes an entry's sizeBytes, downloadedFiles, and dataDir from its local data_dir, all empty when it has none", async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-size-test-'));
     try {
       fs.writeFileSync(path.join(dataDir, 'file1.root'), 'x'.repeat(1024));
@@ -623,10 +661,57 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
 
       assert.strictEqual(byId.get('downloaded')?.sizeBytes, 3072);
       assert.strictEqual(byId.get('downloaded')?.dataDir, dataDir);
+      assert.strictEqual(byId.get('downloaded')?.downloadedFiles, 2);
+      // A record with no data_dir yet still gets the derived download path
+      // (<cache_path>/<request_id>, matching the servicex client) - it just
+      // doesn't exist on disk here, so both counts read as 0.
+      assert.strictEqual(byId.get('submitted')?.dataDir, path.join('/fake/cache', 'submitted'));
       assert.strictEqual(byId.get('submitted')?.sizeBytes, 0);
-      assert.strictEqual(byId.get('submitted')?.dataDir, undefined);
+      assert.strictEqual(byId.get('submitted')?.downloadedFiles, 0);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a still-running cache entry counts files already downloaded into the derived path, despite no data_dir in its record', async () => {
+    // The real shape of a mid-download entry: the servicex client's record
+    // has no data_dir yet (only written once the download fully finishes),
+    // but it has already created <cache_path>/<request_id> and is filling
+    // it file by file. filesCompleted (8, transformed server-side) and the
+    // 3 files actually on disk deliberately disagree, to prove the bar
+    // follows what's been downloaded.
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-derived-test-'));
+    try {
+      const downloadDir = path.join(cachePath, 'r1');
+      fs.mkdirSync(downloadDir, { recursive: true });
+      fs.writeFileSync(path.join(downloadDir, 'file1.root'), 'x');
+      fs.writeFileSync(path.join(downloadDir, 'file2.root'), 'x');
+      fs.writeFileSync(path.join(downloadDir, 'file3.root'), 'x');
+
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'SUBMITTED' }]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          r1: fakeStatus({ requestId: 'r1', title: 'A', status: 'Running', files: 10, filesCompleted: 8 }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const [item] = (await provider.getChildren(roots[0])) as RequestItem[];
+      assert.strictEqual(item.entry.dataDir, downloadDir);
+      assert.strictEqual(item.entry.downloadedFiles, 3);
+
+      const details = await provider.getChildren(item);
+
+      assert.ok(details.some((d) => d.label === 'Progress: ██████░░░░░░░░░░░░░░ 30% (3/10 files downloaded)'));
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
     }
   });
 
@@ -672,6 +757,46 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     provider.refresh();
     await provider.getChildren();
     assert.strictEqual(fetchCount, 2, 'call after refresh() should re-fetch');
+  });
+
+  test('expanding a RequestItem always resolves current data, even a stale instance from before a refresh', async () => {
+    // Mutate the same backendData object between refreshes rather than
+    // re-stubbing: getServiceXApi (correctly) reuses one cached instance
+    // for the life of the test, so a fresh stubServiceXApi() call wouldn't
+    // actually reach it.
+    stubConfig();
+    stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'SUBMITTED', data_dir: undefined }]);
+    const backendData = {
+      'https://default.example.org': {
+        r1: fakeStatus({ requestId: 'r1', title: 'A', status: 'Running', files: 10, filesCompleted: 2 }),
+      },
+    };
+    stubServiceXApi(backendData);
+
+    const provider = new CacheTreeProvider();
+    const roots = (await provider.getChildren()) as TitleGroupItem[];
+    const [staleItem] = (await provider.getChildren(roots[0])) as RequestItem[];
+    assert.strictEqual(staleItem.entry.filesCompleted, 2);
+
+    // Simulate the backend reporting more progress on a subsequent refresh -
+    // staleItem itself is never re-constructed.
+    backendData['https://default.example.org'].r1 = fakeStatus({
+      requestId: 'r1',
+      title: 'A',
+      status: 'Running',
+      files: 10,
+      filesCompleted: 9,
+    });
+    provider.refresh();
+    await provider.getChildren();
+
+    // Expanding the SAME (stale) RequestItem object VS Code might have held
+    // onto must still show the new numbers, not the ones baked into it when
+    // it was first constructed.
+    const details = await provider.getChildren(staleItem);
+    assert.ok(
+      details.some((d) => (d as RequestDetailItem).label === 'Files: Complete 9 · Failed 0 · Total 10')
+    );
   });
 });
 
@@ -1027,6 +1152,63 @@ suite('cacheTreeProvider.ts - CacheTreeProvider backend/failure/date filters, so
   });
 });
 
+suite('cacheTreeProvider.ts - CacheTreeProvider.updateEntry', () => {
+  teardown(restoreStubs);
+
+  test('merges the patch into the matching entry and re-renders without a fetch', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A', status: 'Running', files: 10, filesCompleted: 2 })] }
+    );
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const [before] = (await provider.getChildren()) as RequestItem[];
+    assert.strictEqual(before.entry.filesCompleted, 2);
+
+    const updated = provider.updateEntry('a1', { filesCompleted: 7, status: 'Running' });
+
+    assert.strictEqual(updated, true);
+    const [after] = (await provider.getChildren()) as RequestItem[];
+    assert.strictEqual(after.entry.filesCompleted, 7);
+    // A different object each render, but the same stable id - this is
+    // exactly what lets VS Code keep the row expanded across the update.
+    assert.strictEqual(after.id, before.id);
+  });
+
+  test('leaves every other entry untouched', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      {
+        'https://default.example.org': [
+          fakeStatus({ requestId: 'a1', title: 'A', filesCompleted: 1 }),
+          fakeStatus({ requestId: 'b1', title: 'B', filesCompleted: 1 }),
+        ],
+      }
+    );
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    await provider.getChildren();
+
+    provider.updateEntry('a1', { filesCompleted: 99 });
+
+    const roots = (await provider.getChildren()) as RequestItem[];
+    const byId = new Map(roots.map((r) => [r.entry.requestId, r.entry]));
+    assert.strictEqual(byId.get('a1')?.filesCompleted, 99);
+    assert.strictEqual(byId.get('b1')?.filesCompleted, 1);
+  });
+
+  test('returns false and changes nothing when the requestId is not currently loaded', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] });
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    await provider.getChildren();
+
+    const updated = provider.updateEntry('does-not-exist', { filesCompleted: 5 });
+
+    assert.strictEqual(updated, false);
+  });
+});
+
 suite('cacheTreeProvider.ts - DASHBOARD_SOURCE', () => {
   teardown(restoreStubs);
 
@@ -1328,6 +1510,53 @@ suite('cacheTreeProvider.ts - DASHBOARD_SOURCE', () => {
     assert.ok(details.some((d) => (d as RequestDetailItem).label === 'Size: 2.0 KB'));
   });
 
+  test('a terminal entry\'s size is memoized - re-expanding it never refetches', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' })] },
+      { sizeByRequestId: { a1: 2048 } }
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const [root] = (await provider.getChildren()) as RequestItem[];
+    const firstDetails = await provider.getChildren(root);
+    assert.ok(firstDetails.some((d) => (d as RequestDetailItem).label === 'Size: 2.0 KB'));
+
+    // Re-stub with a different size (and no config at all, so a live fetch
+    // would fail outright) - a genuinely cached value must still win.
+    stubServiceXApi({}, {}, { sizeByRequestId: { a1: 999999 } });
+    const secondDetails = await provider.getChildren(root);
+
+    assert.ok(secondDetails.some((d) => (d as RequestDetailItem).label === 'Size: 2.0 KB'));
+    assert.ok(!secondDetails.some((d) => (d as RequestDetailItem).label?.toString().includes('999999')));
+  });
+
+  test('a non-terminal entry\'s size is never memoized - re-expanding it refetches every time', async () => {
+    // Mutate the same options object between expansions rather than
+    // re-stubbing: getServiceXApi (correctly) reuses one cached instance
+    // for the life of the test, so a fresh stubServiceXApi() call wouldn't
+    // actually reach it - this is exactly why the size fetch itself must be
+    // what changes on the second expand, not the underlying fake.
+    stubConfig();
+    const options: StubServiceXApiOptions = { sizeByRequestId: { a1: 100 } };
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A', status: 'Running' })] },
+      options
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const [root] = (await provider.getChildren()) as RequestItem[];
+    const firstDetails = await provider.getChildren(root);
+    assert.ok(firstDetails.some((d) => (d as RequestDetailItem).label === 'Size: 100 B'));
+
+    options.sizeByRequestId = { a1: 200 };
+    const secondDetails = await provider.getChildren(root);
+
+    assert.ok(secondDetails.some((d) => (d as RequestDetailItem).label === 'Size: 200 B'));
+  });
+
   test('expanding a dashboard entry omits the size row when the backend has no capability for it', async () => {
     stubConfig();
     stubServiceXApi({}, { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] });
@@ -1367,5 +1596,42 @@ suite('cacheTreeProvider.ts - DASHBOARD_SOURCE', () => {
     const details = await provider.getChildren(entry);
 
     assert.ok(!details.some((d) => (d as RequestDetailItem).label?.toString().startsWith('Size:')));
+  });
+});
+
+suite('cacheTreeProvider.ts - getServiceXApi', () => {
+  teardown(clearServiceXApiCache);
+
+  test('returns the same instance for the same endpoint and token', () => {
+    const endpoint = { name: 'a', endpoint: 'https://a.example.org', token: 't1' };
+
+    const first = getServiceXApi(endpoint);
+    const second = getServiceXApi({ ...endpoint });
+
+    assert.strictEqual(first, second);
+  });
+
+  test('returns a different instance for a different token on the same endpoint', () => {
+    const first = getServiceXApi({ name: 'a', endpoint: 'https://a.example.org', token: 't1' });
+    const second = getServiceXApi({ name: 'a', endpoint: 'https://a.example.org', token: 't2' });
+
+    assert.notStrictEqual(first, second);
+  });
+
+  test('returns a different instance for a different endpoint URL', () => {
+    const first = getServiceXApi({ name: 'a', endpoint: 'https://a.example.org', token: 't1' });
+    const second = getServiceXApi({ name: 'b', endpoint: 'https://b.example.org', token: 't1' });
+
+    assert.notStrictEqual(first, second);
+  });
+
+  test('clearServiceXApiCache forces a fresh instance on the next call', () => {
+    const endpoint = { name: 'a', endpoint: 'https://a.example.org', token: 't1' };
+    const first = getServiceXApi(endpoint);
+
+    clearServiceXApiCache();
+    const second = getServiceXApi(endpoint);
+
+    assert.notStrictEqual(first, second);
   });
 });

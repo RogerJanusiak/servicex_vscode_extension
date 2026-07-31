@@ -9,14 +9,15 @@ import {
   TitleGroupItem,
   computeCleanPlan,
   formatBytes,
+  getServiceXApi,
+  isTerminalStatus,
   FailureFilter,
   SortBy,
   SortDirection,
 } from './cacheTreeProvider';
 import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
-import { deleteCacheRecord, deleteAllForTitle, directorySize } from './cacheDb';
+import { deleteCacheRecord, deleteAllForTitle, directorySize, directoryStats } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
-import { ServiceXApi } from './serviceXApi';
 import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
 import {
   DecodedSelection,
@@ -264,6 +265,124 @@ function makeSetGrouping(provider: CacheTreeProvider, contextKey: string): (enab
   };
 }
 
+const LIVE_POLL_INTERVAL_MS = 5000;
+
+/** What one poll tick fetches for an entry and merges back in via
+ *  CacheTreeProvider.updateEntry - the dashboard only has remote status to
+ *  go on, while the cache panel also re-scans local disk (its progress bar
+ *  and size depend on that, not on remote completion). */
+type PollFn = (entry: CacheEntry, endpoint: EndpointConfig) => Promise<Partial<CacheEntry>>;
+
+/**
+ * While a still-running row is expanded, polls it every few seconds via
+ * `pollEntry` and merges the result back into the tree (CacheTreeProvider.
+ * updateEntry) - so the progress bar and other live details stay current
+ * without the user having to manually refresh. Stops automatically once the
+ * transform reaches a terminal status, the row is collapsed, the entry
+ * disappears from the tree (e.g. an intervening full refresh dropped it), or
+ * the extension deactivates. Only ever polls rows the user actually has
+ * expanded - never the whole list - so this doesn't turn into another
+ * source of unbounded background requests. Shared by both panels; each
+ * calls this with its own `pollEntry` and its own independent timer map.
+ */
+function registerLivePolling(
+  context: vscode.ExtensionContext,
+  treeView: vscode.TreeView<unknown>,
+  provider: CacheTreeProvider,
+  pollEntry: PollFn
+): void {
+  const timers = new Map<string, ReturnType<typeof setInterval>>();
+
+  const stop = (requestId: string) => {
+    const timer = timers.get(requestId);
+    if (timer) {
+      clearInterval(timer);
+      timers.delete(requestId);
+    }
+  };
+
+  context.subscriptions.push(
+    treeView.onDidExpandElement(({ element }) => {
+      if (!(element instanceof RequestItem) || isTerminalStatus(element.entry.status)) {
+        return;
+      }
+      const requestId = element.entry.requestId;
+      const backendName = element.entry.backend;
+      if (timers.has(requestId) || !backendName) {
+        return;
+      }
+      timers.set(
+        requestId,
+        setInterval(async () => {
+          const endpoint = resolveConfig().endpoints.find((e) => e.name === backendName);
+          if (!endpoint) {
+            stop(requestId);
+            return;
+          }
+          try {
+            const patch = await pollEntry(element.entry, endpoint);
+            const stillShown = provider.updateEntry(requestId, patch);
+            if (!stillShown || (patch.status && isTerminalStatus(patch.status))) {
+              stop(requestId);
+            }
+          } catch {
+            // Transient failure (network blip, token hiccup) - leave the
+            // last known values in place and try again next tick.
+          }
+        }, LIVE_POLL_INTERVAL_MS)
+      );
+    })
+  );
+
+  context.subscriptions.push(
+    treeView.onDidCollapseElement(({ element }) => {
+      if (element instanceof RequestItem) {
+        stop(element.entry.requestId);
+      }
+    })
+  );
+
+  context.subscriptions.push({
+    dispose: () => {
+      for (const timer of timers.values()) {
+        clearInterval(timer);
+      }
+      timers.clear();
+    },
+  });
+}
+
+/** Dashboard poll: remote status only - there's no local file data at all
+ *  for a dashboard entry. */
+const pollDashboardEntry: PollFn = async (entry, endpoint) => {
+  const status = await getServiceXApi(endpoint).getTransformStatus(entry.requestId);
+  return {
+    status: status.status,
+    submitTime: status.submitTime,
+    finishTime: status.finishTime,
+    files: status.files,
+    filesCompleted: status.filesCompleted,
+    filesFailed: status.filesFailed,
+  };
+};
+
+/** Cache panel poll: remote status, plus a fresh disk scan - its progress
+ *  bar and size row are driven by what's actually downloaded (sizeBytes/
+ *  downloadedFiles), which a plain status call alone wouldn't move. */
+const pollCacheEntry: PollFn = async (entry, endpoint) => {
+  const status = await getServiceXApi(endpoint).getTransformStatus(entry.requestId);
+  const stats = entry.dataDir ? directoryStats(entry.dataDir) : undefined;
+  return {
+    status: status.status,
+    submitTime: status.submitTime,
+    finishTime: status.finishTime,
+    files: status.files,
+    filesCompleted: status.filesCompleted,
+    filesFailed: status.filesFailed,
+    ...(stats ? { sizeBytes: stats.sizeBytes, downloadedFiles: stats.fileCount } : {}),
+  };
+};
+
 export function activate(context: vscode.ExtensionContext) {
   const cacheTreeProvider = new CacheTreeProvider();
   const treeView = vscode.window.createTreeView('servicexCacheView', {
@@ -271,6 +390,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(treeView);
   vscode.commands.executeCommand('setContext', 'servicex.groupingEnabled', true);
+  registerLivePolling(context, treeView, cacheTreeProvider, pollCacheEntry);
 
   /** Shows the total size of everything currently on disk under the cache
    *  path, as a badge next to the view title - always visible, independent
@@ -337,6 +457,7 @@ export function activate(context: vscode.ExtensionContext) {
     'servicex.dashboardGroupingEnabled',
     dashboardTreeProvider.isGroupingEnabled()
   );
+  registerLivePolling(context, dashboardTreeView, dashboardTreeProvider, pollDashboardEntry);
 
   const updateDashboardFilterMessage = makeUpdateFilterMessage(dashboardTreeProvider, dashboardTreeView);
 
@@ -387,7 +508,7 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       try {
-        await new ServiceXApi(endpoint.endpoint, endpoint.token).cancelTransform(item.entry.requestId);
+        await getServiceXApi(endpoint).cancelTransform(item.entry.requestId);
       } catch (e) {
         vscode.window.showErrorMessage(`Couldn't cancel ${item.entry.requestId}: ${(e as Error).message}`);
         return;
@@ -524,7 +645,7 @@ export function activate(context: vscode.ExtensionContext) {
             title: `Fetching the query for ${item.entry.requestId}...`,
           },
           async () => {
-            const api = new ServiceXApi(endpoint.endpoint, endpoint.token);
+            const api = getServiceXApi(endpoint);
             const status = await api.getTransformStatus(item.entry.requestId);
             if (!status.selection?.trim()) {
               return undefined;

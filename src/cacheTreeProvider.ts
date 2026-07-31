@@ -1,7 +1,44 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
-import { loadConfig, orderedEndpoints } from './config';
+import { loadConfig, orderedEndpoints, EndpointConfig } from './config';
 import { ServiceXApi, NotFoundError, TransformStatus } from './serviceXApi';
-import { readCacheRecords, completedRecords, submittedRecords, directorySize, CacheDbRecord } from './cacheDb';
+import { readCacheRecords, completedRecords, submittedRecords, directoryStats, CacheDbRecord } from './cacheDb';
+
+const apiInstances = new Map<string, ServiceXApi>();
+
+/**
+ * A shared ServiceXApi per (endpoint, token) pair, reused for the life of
+ * the session instead of a fresh instance every fetch/expand. ServiceXApi
+ * already caches its own access token and capability list internally - a
+ * brand new instance was throwing that away every time, forcing a token
+ * refresh and (once size-fetching landed) a capability check on every single
+ * row expansion, even for a backend already checked moments earlier. Keyed
+ * on the token too so an edited servicex.yaml naturally gets a fresh
+ * instance rather than needing explicit cache invalidation.
+ */
+export function getServiceXApi(endpoint: EndpointConfig): ServiceXApi {
+  const key = `${endpoint.endpoint}::${endpoint.token ?? ''}`;
+  let api = apiInstances.get(key);
+  if (!api) {
+    api = new ServiceXApi(endpoint.endpoint, endpoint.token);
+    apiInstances.set(key, api);
+  }
+  return api;
+}
+
+/**
+ * Resets every session-lifetime cache this module keeps (the shared
+ * ServiceXApi instances and the terminal-transform size memo) - real code
+ * never needs this (the whole point is that they persist), but tests do:
+ * without it, an api/size cached by one test - built against whatever
+ * ServiceXApi/getTransformSize behavior that test stubbed - would silently
+ * leak into the next test that happens to reuse the same endpoint or
+ * requestId, ignoring its own stubs entirely.
+ */
+export function clearServiceXApiCache(): void {
+  apiInstances.clear();
+  terminalSizeCache.clear();
+}
 
 export interface CacheEntry {
   requestId: string;
@@ -22,6 +59,12 @@ export interface CacheEntry {
   /** Size on disk of this request's downloaded files, in bytes - 0 if
    *  nothing has been downloaded yet (e.g. still SUBMITTED). */
   sizeBytes: number;
+  /** Files currently present under dataDir, i.e. downloaded so far - only
+   *  ever set for a cache-panel entry (dashboard entries have no local
+   *  files at all, so this stays undefined for them). Drives the cache
+   *  panel's progress bar showing download progress rather than the
+   *  backend's transform-completion progress. */
+  downloadedFiles?: number;
   /** Local directory holding this request's downloaded files - undefined
    *  for a still-SUBMITTED request with nothing downloaded yet. */
   dataDir?: string;
@@ -159,6 +202,12 @@ export class TitleGroupItem extends vscode.TreeItem {
       `${entries.length} request${entries.length === 1 ? '' : 's'}` +
       (totalSize > 0 ? ` · ${formatBytes(totalSize)}` : '');
     this.contextValue = contextValue;
+    // A stable id (title, scoped by backend when tabbed) so VS Code can tell
+    // this is "the same" node across a soft refresh and keep it expanded,
+    // rather than treating the freshly-constructed object as a new node and
+    // collapsing it - see the live-polling loop in extension.ts, which fires
+    // exactly that kind of refresh every few seconds for an expanded row.
+    this.id = `${entries[0]?.backend ?? ''}:${title}`;
   }
 }
 
@@ -189,6 +238,7 @@ export class BackendGroupItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon('server');
     }
     this.contextValue = 'servicexBackendGroup';
+    this.id = `backend:${backend}`;
   }
 }
 
@@ -212,11 +262,11 @@ export function isTerminalStatus(status: string): boolean {
  * meaningful once `total` is known to be positive - a request can report 0
  * files while it's still figuring out what it needs to process.
  */
-function progressBarLabel(completed: number, total: number, width = 20): string {
+function progressBarLabel(completed: number, total: number, noun = 'files', width = 20): string {
   const ratio = Math.min(1, completed / total);
   const filled = Math.round(ratio * width);
   const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
-  return `Progress: ${bar} ${Math.round(ratio * 100)}% (${completed}/${total} files)`;
+  return `Progress: ${bar} ${Math.round(ratio * 100)}% (${completed}/${total} ${noun})`;
 }
 
 /**
@@ -279,6 +329,10 @@ export class RequestItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon('warning');
     }
     this.contextValue = options?.contextValue ?? 'servicexCacheRequest';
+    // requestId is a real backend-issued id, already globally unique - a
+    // stable id here is what lets a soft refresh (see TitleGroupItem above)
+    // update this row's contents in place instead of collapsing it.
+    this.id = `request:${entry.requestId}`;
   }
 }
 
@@ -303,7 +357,15 @@ export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
     ),
   ];
   if (!isTerminalStatus(entry.status) && entry.files > 0) {
-    details.push(new RequestDetailItem(progressBarLabel(entry.filesCompleted, entry.files)));
+    // The cache panel counts files the servicex client has actually written
+    // to disk so far, which is the number a user waiting on a download
+    // cares about; the dashboard has no local files at all, so it falls
+    // back to the backend's own transform-completion count.
+    details.push(
+      entry.downloadedFiles !== undefined
+        ? new RequestDetailItem(progressBarLabel(entry.downloadedFiles, entry.files, 'files downloaded'))
+        : new RequestDetailItem(progressBarLabel(entry.filesCompleted, entry.files))
+    );
   }
   if (entry.fileList?.length) {
     details.push(new RequestDetailItem(`Downloaded files: ${entry.fileList.length}`));
@@ -505,6 +567,30 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     this._onDidChangeTreeData.fire();
   }
 
+  /**
+   * Merges `patch` into the currently-loaded entry matching `requestId` and
+   * re-renders from already-held data, with no network call of its own -
+   * used by the dashboard's live-polling loop (extension.ts) to keep an
+   * expanded running row's status/progress/size current between full
+   * refreshes. Returns false without doing anything if that entry isn't
+   * currently loaded (e.g. a refresh in the meantime dropped it), which the
+   * poller uses as a signal to stop polling for it.
+   */
+  updateEntry(requestId: string, patch: Partial<CacheEntry>): boolean {
+    const index = this.rawEntries.findIndex((e) => e.requestId === requestId);
+    if (index === -1) {
+      return false;
+    }
+    this.rawEntries = [
+      ...this.rawEntries.slice(0, index),
+      { ...this.rawEntries[index], ...patch },
+      ...this.rawEntries.slice(index + 1),
+    ];
+    this.rebuildTree();
+    this._onDidChangeTreeData.fire();
+    return true;
+  }
+
   private filteredEntries(): CacheEntry[] {
     return filterEntries(this.rawEntries, {
       status: this.statusFilter,
@@ -594,8 +680,14 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       return element.entries.map((e) => new RequestItem(e, { contextValue: this.requestContextValue(e) }));
     }
     if (element instanceof RequestItem) {
-      const details = buildRequestDetails(element.entry);
-      const sizeBytes = await this.source.fetchTransformSize?.(element.entry);
+      // Re-resolve from rawEntries by id rather than trusting element.entry
+      // directly - VS Code can hand back a RequestItem instance from before
+      // the most recent refresh/poll when reconciling an already-expanded
+      // row, which would otherwise freeze its detail rows (progress bar,
+      // size, file counts) at whatever was true when it was first expanded.
+      const current = this.rawEntries.find((e) => e.requestId === element.entry.requestId) ?? element.entry;
+      const details = buildRequestDetails(current);
+      const sizeBytes = await this.source.fetchTransformSize?.(current);
       if (sizeBytes !== undefined) {
         details.push(new RequestDetailItem(`Size: ${formatBytes(sizeBytes)}`));
       }
@@ -651,7 +743,7 @@ async function fetchCacheEntries(): Promise<FetchResult> {
   const endpoints = orderedEndpoints(config, settings.get<string>('backend') || undefined);
   const namedApis = endpoints.map((e) => ({
     name: e.name,
-    api: new ServiceXApi(e.endpoint, e.token),
+    api: getServiceXApi(e),
   }));
 
   const { records, corrupted } = readCacheRecords(config.cachePath);
@@ -670,7 +762,9 @@ async function fetchCacheEntries(): Promise<FetchResult> {
   }
 
   const entries = await Promise.all(
-    Array.from(localByRequestId.entries()).map(([requestId, local]) => fetchOneEntry(namedApis, requestId, local))
+    Array.from(localByRequestId.entries()).map(([requestId, local]) =>
+      fetchOneEntry(namedApis, requestId, local, config.cachePath)
+    )
   );
   return { entries };
 }
@@ -699,6 +793,14 @@ export const DASHBOARD_SOURCE: CacheTreeSource = {
   fetchTransformSize: fetchDashboardTransformSize,
 };
 
+/** requestId -> bytes, only ever populated for a terminal entry, whose size
+ *  can never change again - lets re-expanding an already-looked-at finished
+ *  transform skip the network round trip entirely. A non-terminal entry is
+ *  deliberately never cached here: its size is expected to change, and
+ *  keeps getting refreshed on every expand (and, while a row is actively
+ *  expanded, by the live-polling loop in extension.ts). */
+const terminalSizeCache = new Map<string, number>();
+
 /**
  * Looks up the one entry's own backend and asks it for that transform's
  * current size (ServiceXApi.getTransformSize) - undefined for any reason
@@ -706,6 +808,12 @@ export const DASHBOARD_SOURCE: CacheTreeSource = {
  * means the row shows no size, rather than an error.
  */
 async function fetchDashboardTransformSize(entry: CacheEntry): Promise<number | undefined> {
+  if (isTerminalStatus(entry.status)) {
+    const cached = terminalSizeCache.get(entry.requestId);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
   if (!entry.backend) {
     return undefined;
   }
@@ -717,7 +825,11 @@ async function fetchDashboardTransformSize(entry: CacheEntry): Promise<number | 
     return undefined;
   }
   try {
-    return await new ServiceXApi(endpoint.endpoint, endpoint.token).getTransformSize(entry.requestId);
+    const size = await getServiceXApi(endpoint).getTransformSize(entry.requestId);
+    if (size !== undefined && isTerminalStatus(entry.status)) {
+      terminalSizeCache.set(entry.requestId, size);
+    }
+    return size;
   } catch {
     return undefined;
   }
@@ -744,7 +856,7 @@ async function fetchDashboardEntries(): Promise<FetchResult> {
   const results = await Promise.all(
     config.endpoints.map(async (e) => {
       try {
-        const statuses = await new ServiceXApi(e.endpoint, e.token).getAllTransforms();
+        const statuses = await getServiceXApi(e).getAllTransforms();
         return {
           name: e.name,
           statuses: mostRecentFirst(statuses).slice(0, DASHBOARD_ENTRIES_PER_BACKEND_LIMIT),
@@ -794,30 +906,52 @@ function localFileList(local: CacheDbRecord): string[] | undefined {
 }
 
 /** The local directory holding a request's downloaded files - undefined for a SUBMITTED record. */
-function localDataDir(local: CacheDbRecord): string | undefined {
-  return typeof local.data_dir === 'string' ? local.data_dir : undefined;
+/**
+ * Where a request's downloaded files live. The servicex Python client only
+ * writes `data_dir` into its db.json record once the whole download has
+ * finished (query_cache.py: cache_submitted_transform omits it, and only
+ * cache_transform sets it), but it creates and starts filling the directory
+ * far earlier - on the first status poll, at a path derived purely from the
+ * request id (query_cache.py's cache_path_for_transform). Falling back to
+ * that derived path is what makes a still-running request's real download
+ * progress visible at all, instead of reading as 0 until the moment it
+ * finishes.
+ */
+function localDataDir(local: CacheDbRecord, cachePath?: string, requestId?: string): string | undefined {
+  if (typeof local.data_dir === 'string') {
+    return local.data_dir;
+  }
+  return cachePath && requestId ? path.join(cachePath, requestId) : undefined;
 }
 
 function localCodegen(local: CacheDbRecord): string | undefined {
   return typeof local.codegen === 'string' ? local.codegen : undefined;
 }
 
-/** Size on disk of a request's downloaded files - 0 for a SUBMITTED record, which has no data_dir yet. */
-function localSizeBytes(local: CacheDbRecord): number {
-  const dataDir = localDataDir(local);
-  return dataDir ? directorySize(dataDir) : 0;
+/** Size on disk and file count of a request's downloaded files, in one walk -
+ *  both 0 when nothing has been downloaded yet (directoryStats treats a
+ *  missing directory as empty, so an as-yet-uncreated one is simply 0). */
+function localDirectoryStats(
+  local: CacheDbRecord,
+  cachePath?: string,
+  requestId?: string
+): { sizeBytes: number; fileCount: number } {
+  const dataDir = localDataDir(local, cachePath, requestId);
+  return dataDir ? directoryStats(dataDir) : { sizeBytes: 0, fileCount: 0 };
 }
 
 async function fetchOneEntry(
   apis: { name: string; api: ServiceXApi }[],
   requestId: string,
-  local: CacheDbRecord
+  local: CacheDbRecord,
+  cachePath?: string
 ): Promise<CacheEntry> {
   let lastError: unknown;
 
   for (const { name, api } of apis) {
     try {
       const remote = await api.getTransformStatus(requestId);
+      const stats = localDirectoryStats(local, cachePath, requestId);
       return {
         requestId,
         title: remote.title || local.title || 'No Title',
@@ -830,8 +964,9 @@ async function fetchOneEntry(
         stale: false,
         backend: name,
         fileList: localFileList(local),
-        sizeBytes: localSizeBytes(local),
-        dataDir: localDataDir(local),
+        sizeBytes: stats.sizeBytes,
+        downloadedFiles: stats.fileCount,
+        dataDir: localDataDir(local, cachePath, requestId),
         codegen: localCodegen(local),
       };
     } catch (e) {
@@ -846,6 +981,7 @@ async function fetchOneEntry(
     }
   }
 
+  const stats = localDirectoryStats(local, cachePath, requestId);
   return {
     requestId,
     title: local.title || 'No Title',
@@ -860,8 +996,9 @@ async function fetchOneEntry(
     filesFailed: 0,
     stale: true,
     fileList: localFileList(local),
-    sizeBytes: localSizeBytes(local),
-    dataDir: localDataDir(local),
+    sizeBytes: stats.sizeBytes,
+    downloadedFiles: stats.fileCount,
+    dataDir: localDataDir(local, cachePath, requestId),
     codegen: localCodegen(local),
   };
 }

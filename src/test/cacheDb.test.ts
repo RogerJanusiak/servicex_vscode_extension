@@ -9,6 +9,7 @@ import {
   deleteCacheRecord,
   deleteAllForTitle,
   directorySize,
+  directoryStats,
 } from '../cacheDb';
 
 function mkTmpDir(): string {
@@ -226,5 +227,19 @@ suite('cacheDb.ts', () => {
     fs.writeFileSync(path.join(nested, 'deep.root'), 'x'.repeat(30));
 
     assert.strictEqual(directorySize(cachePath), 60);
+  });
+
+  test('directoryStats returns {0, 0} for a path that does not exist', () => {
+    assert.deepStrictEqual(directoryStats(path.join(cachePath, 'nope')), { sizeBytes: 0, fileCount: 0 });
+  });
+
+  test('directoryStats counts files and sums their size in one walk, including nested subdirectories', () => {
+    const nested = path.join(cachePath, 'req-1', 'sub');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'top.root'), 'x'.repeat(10));
+    fs.writeFileSync(path.join(cachePath, 'req-1', 'mid.root'), 'x'.repeat(20));
+    fs.writeFileSync(path.join(nested, 'deep.root'), 'x'.repeat(30));
+
+    assert.deepStrictEqual(directoryStats(cachePath), { sizeBytes: 60, fileCount: 3 });
   });
 });

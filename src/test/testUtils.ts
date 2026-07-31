@@ -2,7 +2,7 @@ import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
 import * as serviceXApiModule from '../serviceXApi';
 import { NotFoundError, TransformStatus } from '../serviceXApi';
-import { CacheEntry } from '../cacheTreeProvider';
+import { CacheEntry, clearServiceXApiCache } from '../cacheTreeProvider';
 import { CacheDbRecord } from '../cacheDb';
 import { EndpointConfig } from '../config';
 
@@ -30,6 +30,12 @@ export function restoreStubs(): void {
     const s = activeStubs.pop()!;
     s.obj[s.key] = s.original;
   }
+  // cacheTreeProvider.ts keeps its own session-lifetime caches (ServiceXApi
+  // instances, terminal-transform sizes) outside this stub-tracking system -
+  // without clearing them here too, one test's cached api/size (built
+  // against whatever it stubbed) would leak into the next test that reuses
+  // the same endpoint or requestId.
+  clearServiceXApiCache();
 }
 
 // ---------------------------------------------------------------------------

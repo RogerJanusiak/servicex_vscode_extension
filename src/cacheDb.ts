@@ -191,33 +191,49 @@ export function deleteAllForTitle(cachePath: string, title: string): number {
   return count;
 }
 
+export interface DirectoryStats {
+  sizeBytes: number;
+  fileCount: number;
+}
+
 /**
- * Total size in bytes of every regular file under `dirPath`, recursively.
- * Returns 0 for a path that doesn't exist (e.g. a SUBMITTED request with no
- * data_dir yet, or a cache directory that hasn't been created). Skips
- * entries that vanish mid-walk (e.g. a concurrent delete) rather than
- * throwing.
+ * Total size and file count of every regular file under `dirPath`,
+ * recursively, in a single walk - used wherever both numbers are wanted
+ * (e.g. a cache entry's "downloaded so far" progress needs both) so nothing
+ * has to walk the same directory tree twice. Both are 0 for a path that
+ * doesn't exist (e.g. a SUBMITTED request with no data_dir yet, or a cache
+ * directory that hasn't been created). Skips entries that vanish mid-walk
+ * (e.g. a concurrent delete) rather than throwing.
  */
-export function directorySize(dirPath: string): number {
+export function directoryStats(dirPath: string): DirectoryStats {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dirPath, { withFileTypes: true });
   } catch {
-    return 0;
+    return { sizeBytes: 0, fileCount: 0 };
   }
 
-  let total = 0;
+  let sizeBytes = 0;
+  let fileCount = 0;
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name);
     if (entry.isDirectory()) {
-      total += directorySize(fullPath);
+      const nested = directoryStats(fullPath);
+      sizeBytes += nested.sizeBytes;
+      fileCount += nested.fileCount;
     } else if (entry.isFile()) {
+      fileCount++;
       try {
-        total += fs.statSync(fullPath).size;
+        sizeBytes += fs.statSync(fullPath).size;
       } catch {
         // Raced with a concurrent delete - just skip it.
       }
     }
   }
-  return total;
+  return { sizeBytes, fileCount };
+}
+
+/** Total size in bytes of every regular file under `dirPath` - see directoryStats(). */
+export function directorySize(dirPath: string): number {
+  return directoryStats(dirPath).sizeBytes;
 }
