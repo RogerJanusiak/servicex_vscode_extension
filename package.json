@@ -97,6 +97,35 @@
         "command": "servicex.ungroup",
         "title": "ServiceX: Ungroup",
         "icon": "$(list-flat)"
+      },
+      {
+        "command": "servicex.refreshDashboard",
+        "title": "ServiceX: Refresh Dashboard",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "servicex.openDashboardFilterMenu",
+        "title": "ServiceX: Filter Dashboard...",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "servicex.clearAllDashboardFilters",
+        "title": "ServiceX: Clear All Dashboard Filters"
+      },
+      {
+        "command": "servicex.openDashboardSortMenu",
+        "title": "ServiceX: Sort Dashboard...",
+        "icon": "$(sort-precedence)"
+      },
+      {
+        "command": "servicex.groupDashboardByTitle",
+        "title": "ServiceX: Group Dashboard by Title",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "servicex.ungroupDashboard",
+        "title": "ServiceX: Ungroup Dashboard",
+        "icon": "$(list-flat)"
       }
     ],
     "viewsContainers": {
@@ -113,6 +142,10 @@
         {
           "id": "servicexCacheView",
           "name": "Cached Transforms"
+        },
+        {
+          "id": "servicexDashboardView",
+          "name": "Dashboard Transforms"
         }
       ]
     },
@@ -152,6 +185,36 @@
           "command": "servicex.openCacheRootFolder",
           "when": "view == servicexCacheView",
           "group": "2_folder"
+        },
+        {
+          "command": "servicex.openDashboardFilterMenu",
+          "when": "view == servicexDashboardView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "servicex.openDashboardSortMenu",
+          "when": "view == servicexDashboardView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "servicex.groupDashboardByTitle",
+          "when": "view == servicexDashboardView && !servicex.dashboardGroupingEnabled",
+          "group": "navigation@3"
+        },
+        {
+          "command": "servicex.ungroupDashboard",
+          "when": "view == servicexDashboardView && servicex.dashboardGroupingEnabled",
+          "group": "navigation@3"
+        },
+        {
+          "command": "servicex.refreshDashboard",
+          "when": "view == servicexDashboardView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "servicex.clearAllDashboardFilters",
+          "when": "view == servicexDashboardView",
+          "group": "1_filter"
         }
       ],
       "view/item/context": [
@@ -194,6 +257,21 @@
           "command": "servicex.deleteGroup",
           "when": "view == servicexCacheView && viewItem == servicexTitleGroup",
           "group": "inline"
+        },
+        {
+          "command": "servicex.copyRequestId",
+          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "servicex.showQuery",
+          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest",
+          "group": "2_open@1"
+        },
+        {
+          "command": "servicex.openDashboard",
+          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest",
+          "group": "2_open@2"
         }
       ]
     },

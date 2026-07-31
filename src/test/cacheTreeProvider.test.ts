@@ -4,7 +4,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
+  BackendGroupItem,
   CacheTreeProvider,
+  DASHBOARD_SOURCE,
   MessageItem,
   RequestDetailItem,
   RequestItem,
@@ -982,5 +984,258 @@ suite('cacheTreeProvider.ts - CacheTreeProvider backend/failure/date filters, so
 
     assert.ok(roots.every((r) => r instanceof TitleGroupItem));
     assert.deepStrictEqual(roots.map((g) => g.title), ['Apple', 'Mango', 'Zebra']);
+  });
+});
+
+suite('cacheTreeProvider.ts - DASHBOARD_SOURCE', () => {
+  teardown(restoreStubs);
+
+  test('fetches every configured endpoint unconditionally, with no local file data', async () => {
+    stubConfig([
+      { name: 'alpha', endpoint: 'https://alpha.example.org', token: 't1' },
+      { name: 'beta', endpoint: 'https://beta.example.org', token: 't2' },
+    ]);
+    stubServiceXApi(
+      {},
+      {
+        'https://alpha.example.org': [fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' })],
+        'https://beta.example.org': [fakeStatus({ requestId: 'b1', title: 'B', status: 'Running' })],
+      }
+    );
+
+    const { entries, backends } = await DASHBOARD_SOURCE.fetchEntries();
+
+    assert.strictEqual(entries.length, 2);
+    const byId = new Map(entries.map((e) => [e.requestId, e]));
+    assert.strictEqual(byId.get('a1')?.backend, 'alpha');
+    assert.strictEqual(byId.get('b1')?.backend, 'beta');
+    // No local db.json involved - none of these fields can be populated.
+    assert.strictEqual(byId.get('a1')?.fileList, undefined);
+    assert.strictEqual(byId.get('a1')?.dataDir, undefined);
+    assert.strictEqual(byId.get('a1')?.sizeBytes, 0);
+    // Every configured backend is reported, with no error - drives the
+    // BackendGroupItem tabs regardless of which ones actually had entries.
+    assert.deepStrictEqual(backends, [
+      { name: 'alpha', error: undefined },
+      { name: 'beta', error: undefined },
+    ]);
+  });
+
+  test('warns about a failed backend, still returns the others, and reports its error for the tab', async () => {
+    stubConfig([
+      { name: 'alpha', endpoint: 'https://alpha.example.org', token: 't1' },
+      { name: 'beta', endpoint: 'https://beta.example.org', token: 't2' },
+    ]);
+    stubServiceXApi(
+      {},
+      {
+        'https://alpha.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })],
+        'https://beta.example.org': new Error('backend unreachable'),
+      }
+    );
+    let warning: string | undefined;
+    stub(vscode.window, 'showWarningMessage', (msg: string) => {
+      warning = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const { entries, backends } = await DASHBOARD_SOURCE.fetchEntries();
+
+    assert.deepStrictEqual(entries.map((e) => e.requestId), ['a1']);
+    assert.ok(warning?.includes('beta'));
+    assert.ok(warning?.includes('backend unreachable'));
+    assert.deepStrictEqual(backends, [
+      { name: 'alpha', error: undefined },
+      { name: 'beta', error: 'backend unreachable' },
+    ]);
+  });
+
+  test('caps each backend independently at its 30 most recent transforms', async () => {
+    stubConfig([
+      { name: 'busy', endpoint: 'https://busy.example.org', token: 't1' },
+      { name: 'quiet', endpoint: 'https://quiet.example.org', token: 't2' },
+    ]);
+    const busyStatuses = Array.from({ length: 50 }, (_, i) =>
+      fakeStatus({ requestId: `busy-${i}`, title: `T${i}`, submitTime: new Date(i * 1000) })
+    );
+    stubServiceXApi(
+      {},
+      {
+        'https://busy.example.org': busyStatuses,
+        'https://quiet.example.org': [fakeStatus({ requestId: 'quiet-1', title: 'Q', submitTime: new Date(0) })],
+      }
+    );
+
+    const { entries } = await DASHBOARD_SOURCE.fetchEntries();
+
+    const busyEntries = entries.filter((e) => e.backend === 'busy');
+    const quietEntries = entries.filter((e) => e.backend === 'quiet');
+    assert.strictEqual(busyEntries.length, 30);
+    assert.strictEqual(quietEntries.length, 1, "a quiet backend's small result set must not be squeezed out");
+    // The kept 30 must be the most recently submitted ones, not the first 30 returned.
+    assert.deepStrictEqual(
+      busyEntries.map((e) => e.requestId).sort(),
+      busyStatuses
+        .slice(20)
+        .map((s) => s.requestId)
+        .sort()
+    );
+  });
+
+  test('a dashboard provider defaults to ungrouped, unlike the cache panel', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] });
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = await provider.getChildren();
+
+    assert.ok(roots[0] instanceof RequestItem);
+    assert.strictEqual((roots[0] as RequestItem).contextValue, 'servicexDashboardRequest');
+  });
+
+  test('provider built with DASHBOARD_SOURCE stamps dashboard contextValues once grouped', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] });
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    provider.setGroupingEnabled(true);
+    const roots = await provider.getChildren();
+
+    assert.ok(roots[0] instanceof TitleGroupItem);
+    assert.strictEqual((roots[0] as TitleGroupItem).contextValue, 'servicexDashboardTitleGroup');
+    const children = (await provider.getChildren(roots[0])) as RequestItem[];
+    assert.strictEqual(children[0].contextValue, 'servicexDashboardRequest');
+  });
+
+  test('provider built with DASHBOARD_SOURCE shows the dashboard-specific empty message', async () => {
+    stubConfig();
+    stubServiceXApi({}, {});
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = await provider.getChildren();
+
+    assert.strictEqual(roots.length, 1);
+    assert.strictEqual((roots[0] as MessageItem).label, 'No transforms found on the dashboard.');
+  });
+
+  test('splits into one BackendGroupItem tab per backend once more than one has entries', async () => {
+    stubConfig([
+      { name: 'alpha', endpoint: 'https://alpha.example.org', token: 't1' },
+      { name: 'beta', endpoint: 'https://beta.example.org', token: 't2' },
+    ]);
+    stubServiceXApi(
+      {},
+      {
+        'https://alpha.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })],
+        'https://beta.example.org': [fakeStatus({ requestId: 'b1', title: 'B' })],
+      }
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = await provider.getChildren();
+
+    assert.strictEqual(roots.length, 2);
+    assert.ok(roots.every((r) => r instanceof BackendGroupItem));
+    assert.deepStrictEqual(
+      (roots as BackendGroupItem[]).map((r) => r.backend).sort(),
+      ['alpha', 'beta']
+    );
+
+    // Ungrouped by default (see the dedicated grouping-default test) - each
+    // tab's own children are flat RequestItems, not further title-grouped.
+    const alphaTab = (roots as BackendGroupItem[]).find((r) => r.backend === 'alpha')!;
+    const alphaChildren = (await provider.getChildren(alphaTab)) as RequestItem[];
+    assert.strictEqual(alphaChildren.length, 1);
+    assert.ok(alphaChildren[0] instanceof RequestItem);
+    assert.strictEqual(alphaChildren[0].entry.requestId, 'a1');
+  });
+
+  test('does not tab a single configured backend, even though groupByBackend is set', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] });
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = await provider.getChildren();
+
+    assert.ok(roots.every((r) => !(r instanceof BackendGroupItem)));
+  });
+
+  test('a backend with zero transforms still gets its own tab, showing an empty state', async () => {
+    stubConfig([
+      { name: 'uchicago', endpoint: 'https://uchicago.example.org', token: 't1' },
+      { name: 'af-af', endpoint: 'https://af-af.example.org', token: 't2' },
+    ]);
+    stubServiceXApi(
+      {},
+      {
+        'https://uchicago.example.org': [],
+        'https://af-af.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })],
+      }
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = (await provider.getChildren()) as BackendGroupItem[];
+
+    assert.strictEqual(roots.length, 2);
+    const uchicagoTab = roots.find((r) => r.backend === 'uchicago')!;
+    assert.strictEqual(uchicagoTab.error, undefined);
+    const uchicagoChildren = await provider.getChildren(uchicagoTab);
+    assert.strictEqual(uchicagoChildren.length, 1);
+    assert.ok(uchicagoChildren[0] instanceof MessageItem);
+    assert.strictEqual((uchicagoChildren[0] as MessageItem).label, 'No transforms found on uchicago.');
+  });
+
+  test('a backend that failed to load still gets its own tab, showing the actual error', async () => {
+    stubConfig([
+      { name: 'uchicago', endpoint: 'https://uchicago.example.org', token: 't1' },
+      { name: 'af-af', endpoint: 'https://af-af.example.org', token: 't2' },
+    ]);
+    stubServiceXApi(
+      {},
+      {
+        'https://uchicago.example.org': new Error('ServiceX WebAPI error 401'),
+        'https://af-af.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })],
+      }
+    );
+    stub(vscode.window, 'showWarningMessage', () => Promise.resolve(undefined));
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = (await provider.getChildren()) as BackendGroupItem[];
+
+    assert.strictEqual(roots.length, 2);
+    const uchicagoTab = roots.find((r) => r.backend === 'uchicago')!;
+    assert.strictEqual(uchicagoTab.error, 'ServiceX WebAPI error 401');
+    assert.strictEqual(uchicagoTab.description, 'Error loading transforms');
+    assert.strictEqual(uchicagoTab.tooltip, 'ServiceX WebAPI error 401');
+    assert.strictEqual((uchicagoTab.iconPath as vscode.ThemeIcon).id, 'error');
+
+    const uchicagoChildren = await provider.getChildren(uchicagoTab);
+    assert.strictEqual(uchicagoChildren.length, 1);
+    assert.ok(uchicagoChildren[0] instanceof MessageItem);
+    assert.strictEqual((uchicagoChildren[0] as MessageItem).label, 'ServiceX WebAPI error 401');
+  });
+
+  test('the cache-panel default source never tabs by backend, even with a fallback in play', async () => {
+    stubConfig([
+      { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },
+      { name: 'secondary', endpoint: 'https://secondary.example.org', token: 't2' },
+    ]);
+    stubCacheRecords([
+      { request_id: 'on-primary', title: 'OnPrimary', status: 'COMPLETE' },
+      { request_id: 'on-secondary', title: 'OnSecondary', status: 'COMPLETE' },
+    ]);
+    stubServiceXApi({
+      'https://primary.example.org': {
+        'on-primary': fakeStatus({ requestId: 'on-primary', title: 'OnPrimary' }),
+      },
+      'https://secondary.example.org': {
+        'on-secondary': fakeStatus({ requestId: 'on-secondary', title: 'OnSecondary' }),
+      },
+    });
+
+    const provider = new CacheTreeProvider();
+    const roots = await provider.getChildren();
+
+    assert.ok(roots.every((r) => !(r instanceof BackendGroupItem)));
   });
 });

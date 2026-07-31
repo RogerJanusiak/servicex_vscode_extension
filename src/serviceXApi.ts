@@ -98,4 +98,20 @@ export class ServiceXApi {
     }
     return parseTransformStatus(await res.json());
   }
+
+  /**
+   * Every transform visible to this token on this backend - mirrors
+   * ServiceXAdapter.get_transforms in the Python client, which is what the
+   * web dashboard itself calls to list "my" transforms. No id in the path
+   * (unlike getTransformStatus), and the response wraps the same per-
+   * transform shape in a "requests" array instead of returning one directly.
+   */
+  async getAllTransforms(): Promise<TransformStatus[]> {
+    const res = await this.getWithAuth('/servicex/transformation');
+    if (!res.ok) {
+      throw new Error(`ServiceX WebAPI error ${res.status}`);
+    }
+    const body: any = await res.json();
+    return (body.requests ?? []).map(parseTransformStatus);
+  }
 }

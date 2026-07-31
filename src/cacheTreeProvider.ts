@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { loadConfig, orderedEndpoints } from './config';
-import { ServiceXApi, NotFoundError } from './serviceXApi';
+import { ServiceXApi, NotFoundError, TransformStatus } from './serviceXApi';
 import { readCacheRecords, completedRecords, submittedRecords, directorySize, CacheDbRecord } from './cacheDb';
 
 export interface CacheEntry {
@@ -150,14 +150,45 @@ export class TitleGroupItem extends vscode.TreeItem {
   constructor(
     public readonly title: string,
     public readonly entries: CacheEntry[],
-    public readonly allEntries: CacheEntry[] = entries
+    public readonly allEntries: CacheEntry[] = entries,
+    contextValue = 'servicexTitleGroup'
   ) {
     super(title, vscode.TreeItemCollapsibleState.Expanded);
     const totalSize = groupSizeBytes(entries);
     this.description =
       `${entries.length} request${entries.length === 1 ? '' : 's'}` +
       (totalSize > 0 ? ` · ${formatBytes(totalSize)}` : '');
-    this.contextValue = 'servicexTitleGroup';
+    this.contextValue = contextValue;
+  }
+}
+
+/**
+ * Top-level "tab" grouping every entry from one backend - inserted above the
+ * usual title-grouped/flat structure only when a source opts into it
+ * (`CacheTreeSource.groupByBackend`) and more than one backend is actually
+ * present, e.g. the dashboard panel querying several configured endpoints at
+ * once. A single-backend setup (the common case for the cache panel) never
+ * shows this extra layer.
+ */
+export class BackendGroupItem extends vscode.TreeItem {
+  /** @param error When this backend failed to load, the error message - shown
+   *    right on the row (not just buried in a warning toast) and again as
+   *    this tab's only child when expanded. */
+  constructor(
+    public readonly backend: string,
+    public readonly entries: CacheEntry[],
+    public readonly error?: string
+  ) {
+    super(backend, vscode.TreeItemCollapsibleState.Expanded);
+    if (error) {
+      this.description = 'Error loading transforms';
+      this.tooltip = error;
+      this.iconPath = new vscode.ThemeIcon('error');
+    } else {
+      this.description = `${entries.length} request${entries.length === 1 ? '' : 's'}`;
+      this.iconPath = new vscode.ThemeIcon('server');
+    }
+    this.contextValue = 'servicexBackendGroup';
   }
 }
 
@@ -199,7 +230,7 @@ export class MessageItem extends vscode.TreeItem {
  * collapsed row.
  */
 export class RequestItem extends vscode.TreeItem {
-  constructor(public readonly entry: CacheEntry, options?: { showTitle?: boolean }) {
+  constructor(public readonly entry: CacheEntry, options?: { showTitle?: boolean; contextValue?: string }) {
     super(entry.status, vscode.TreeItemCollapsibleState.Collapsed);
     this.description =
       (options?.showTitle ? `${entry.title} · ` : '') +
@@ -220,7 +251,7 @@ export class RequestItem extends vscode.TreeItem {
     if (entry.stale) {
       this.iconPath = new vscode.ThemeIcon('warning');
     }
-    this.contextValue = 'servicexCacheRequest';
+    this.contextValue = options?.contextValue ?? 'servicexCacheRequest';
   }
 }
 
@@ -256,7 +287,53 @@ export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
   return details;
 }
 
-type CacheNode = TitleGroupItem | RequestItem | RequestDetailItem | MessageItem;
+type CacheNode = BackendGroupItem | TitleGroupItem | RequestItem | RequestDetailItem | MessageItem;
+
+/** One backend a source considered, independent of whether it actually
+ *  contributed any entries - the difference between "queried fine, just
+ *  happens to have nothing" and "failed to load" (with why) is exactly what
+ *  lets a BackendGroupItem tab stay visible and explain itself either way,
+ *  instead of a failed backend just silently vanishing from the tree. */
+export interface BackendStatus {
+  name: string;
+  error?: string;
+}
+
+export interface FetchResult {
+  entries: CacheEntry[];
+  /** Every backend the source considered, for sources that opt into
+   *  `groupByBackend` - drives which BackendGroupItem tabs exist, so a
+   *  backend with zero entries (empty or errored) still gets one. Omitted
+   *  entirely by sources that don't use backend tabs. */
+  backends?: BackendStatus[];
+}
+
+/**
+ * Where a CacheTreeProvider's entries come from and how it should present
+ * them - lets the same tree (grouping, filtering, sorting, backend tabs) back
+ * both the local-cache panel and the dashboard panel, which differ only in
+ * how entries are fetched and which context-menu actions make sense for them.
+ */
+export interface CacheTreeSource {
+  fetchEntries: () => Promise<FetchResult>;
+  /** contextValue stamped on every RequestItem this source produces - selects
+   *  which per-request context-menu commands package.json shows for it. */
+  itemContextValue: string;
+  /** contextValue stamped on every TitleGroupItem this source produces. */
+  groupContextValue: string;
+  /** Shown when there are no entries at all. */
+  emptyMessage: string;
+  /** Shown when entries exist but every one is hidden by the active filters. */
+  noMatchMessage: string;
+  /** Insert a top-level per-backend "tab" layer above the usual title-grouped/
+   *  flat structure - only takes effect once the fetch considered more than
+   *  one backend, so a single-backend setup is unaffected. A backend with no
+   *  entries (empty or errored) still gets its own tab rather than vanishing. */
+  groupByBackend?: boolean;
+  /** Whether the tree groups by title initially. Defaults to true (matching
+   *  the cache panel's long-standing behavior) when unset. */
+  defaultGroupingEnabled?: boolean;
+}
 
 export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
@@ -264,6 +341,7 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
   private rootNodes: CacheNode[] = [];
   private rawEntries: CacheEntry[] = [];
+  private backendStatuses: BackendStatus[] = [];
   private loaded = false;
 
   private statusFilter?: Set<string>;
@@ -273,7 +351,11 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
   private sortBy: SortBy = 'date';
   private sortDirection: SortDirection = 'desc';
-  private groupingEnabled = true;
+  private groupingEnabled: boolean;
+
+  constructor(private readonly source: CacheTreeSource = DEFAULT_CACHE_SOURCE) {
+    this.groupingEnabled = source.defaultGroupingEnabled ?? true;
+  }
 
   refresh(): void {
     this.loaded = false;
@@ -386,17 +468,17 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   }
 
   /**
-   * Rebuilds the visible root nodes from the currently filtered/sorted
-   * entries. When grouped, each TitleGroupItem's `allEntries` is still the
-   * full unfiltered group - so "Clean" keeps sweeping stale/cancelled/failed
-   * requests even when a filter is hiding them from view.
+   * Builds the title-grouped/flat node list for one set of filtered entries -
+   * used directly at the root when there's no backend-tab layer, and again
+   * inside each BackendGroupItem's children when there is one. `rawForGroup`
+   * is the unfiltered entries to derive each TitleGroupItem's `allEntries`
+   * from (so "Clean" still sees everything for that title/backend regardless
+   * of active filters), scoped to just that backend when tabbed.
    */
-  private rebuildTree(): void {
-    const filtered = this.filteredEntries();
-
+  private buildEntryNodes(filtered: CacheEntry[], rawForGroup: CacheEntry[]): CacheNode[] {
     if (this.groupingEnabled) {
       const rawByTitle = new Map<string, CacheEntry[]>();
-      for (const e of this.rawEntries) {
+      for (const e of rawForGroup) {
         const bucket = rawByTitle.get(e.title);
         if (bucket) {
           bucket.push(e);
@@ -404,14 +486,34 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
           rawByTitle.set(e.title, [e]);
         }
       }
-      this.rootNodes = groupByTitle(filtered, this.sortBy, this.sortDirection).map(
-        (g) => new TitleGroupItem(g.title, g.entries, rawByTitle.get(g.title))
-      );
-    } else {
-      this.rootNodes = sortEntries(filtered, this.sortBy, this.sortDirection).map(
-        (e) => new RequestItem(e, { showTitle: true })
+      return groupByTitle(filtered, this.sortBy, this.sortDirection).map(
+        (g) => new TitleGroupItem(g.title, g.entries, rawByTitle.get(g.title), this.source.groupContextValue)
       );
     }
+    return sortEntries(filtered, this.sortBy, this.sortDirection).map(
+      (e) => new RequestItem(e, { showTitle: true, contextValue: this.source.itemContextValue })
+    );
+  }
+
+  /**
+   * Rebuilds the visible root nodes from the currently filtered/sorted
+   * entries. When the source opts into backend tabs and the fetch considered
+   * more than one backend, the root becomes one BackendGroupItem per backend
+   * - every configured one, not just those with matching entries, so a
+   * backend that came back empty or failed still gets a tab instead of
+   * silently disappearing - instead of going straight to the usual
+   * title-grouped/flat structure. Each tab's own children are built lazily in
+   * getChildren() via the same buildEntryNodes() helper.
+   */
+  private rebuildTree(): void {
+    const filtered = this.filteredEntries();
+
+    this.rootNodes =
+      this.source.groupByBackend && this.backendStatuses.length > 1
+        ? this.backendStatuses.map(
+            (b) => new BackendGroupItem(b.name, filtered.filter((e) => e.backend === b.name), b.error)
+          )
+        : this.buildEntryNodes(filtered, this.rawEntries);
   }
 
   getTreeItem(element: CacheNode): vscode.TreeItem {
@@ -419,8 +521,18 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
   }
 
   async getChildren(element?: CacheNode): Promise<CacheNode[]> {
+    if (element instanceof BackendGroupItem) {
+      if (element.error) {
+        return [new MessageItem(element.error, 'error')];
+      }
+      const nodes = this.buildEntryNodes(
+        element.entries,
+        this.rawEntries.filter((e) => e.backend === element.backend)
+      );
+      return nodes.length ? nodes : [new MessageItem(`No transforms found on ${element.backend}.`)];
+    }
     if (element instanceof TitleGroupItem) {
-      return element.entries.map((e) => new RequestItem(e));
+      return element.entries.map((e) => new RequestItem(e, { contextValue: this.source.itemContextValue }));
     }
     if (element instanceof RequestItem) {
       return buildRequestDetails(element.entry);
@@ -431,10 +543,13 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
     if (!this.loaded) {
       try {
-        this.rawEntries = await this.fetchEntries();
+        const result = await this.source.fetchEntries();
+        this.rawEntries = result.entries;
+        this.backendStatuses = result.backends ?? [];
         this.rebuildTree();
       } catch (e) {
         this.rawEntries = [];
+        this.backendStatuses = [];
         this.loaded = true;
         return [new MessageItem(`Error: ${(e as Error).message}`, 'error')];
       }
@@ -444,44 +559,144 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     if (this.rootNodes.length) {
       return this.rootNodes;
     }
-    return [
-      new MessageItem(
-        this.hasActiveFilter()
-          ? 'No cached requests match the current filters.'
-          : 'No cached transform requests found.'
-      ),
-    ];
+    return [new MessageItem(this.hasActiveFilter() ? this.source.noMatchMessage : this.source.emptyMessage)];
   }
+}
 
-  private async fetchEntries(): Promise<CacheEntry[]> {
-    const settings = vscode.workspace.getConfiguration('servicex');
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
-    const endpoints = orderedEndpoints(config, settings.get<string>('backend') || undefined);
-    const namedApis = endpoints.map((e) => ({
-      name: e.name,
-      api: new ServiceXApi(e.endpoint, e.token),
-    }));
+/**
+ * Default entry source for the local-cache panel: cross-references db.json
+ * against live backend status, exactly as CacheTreeProvider always did
+ * before dashboard support existed. Used whenever a CacheTreeProvider is
+ * constructed with no explicit source (including every existing call site
+ * and test), so this is the only source with no backend-tab layer of its own
+ * - a request being found on a fallback backend is the rare exception here,
+ * not the norm the way it is for the dashboard source.
+ */
+export const DEFAULT_CACHE_SOURCE: CacheTreeSource = {
+  fetchEntries: fetchCacheEntries,
+  itemContextValue: 'servicexCacheRequest',
+  groupContextValue: 'servicexTitleGroup',
+  emptyMessage: 'No cached transform requests found.',
+  noMatchMessage: 'No cached requests match the current filters.',
+};
 
-    const { records, corrupted } = readCacheRecords(config.cachePath);
-    if (corrupted > 0) {
-      vscode.window.showWarningMessage(
-        `ServiceX: ${corrupted} ${corrupted === 1 ? 'entry' : 'entries'} in the local cache database ` +
-          `(db.json) could not be read and ${corrupted === 1 ? 'was' : 'were'} skipped. The rest of the ` +
-          'cache loaded normally.'
-      );
-    }
-    const localByRequestId = new Map<string, CacheDbRecord>();
-    for (const r of [...completedRecords(records), ...submittedRecords(records)]) {
-      if (r.request_id) {
-        localByRequestId.set(r.request_id, r);
-      }
-    }
+async function fetchCacheEntries(): Promise<FetchResult> {
+  const settings = vscode.workspace.getConfiguration('servicex');
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
+  const endpoints = orderedEndpoints(config, settings.get<string>('backend') || undefined);
+  const namedApis = endpoints.map((e) => ({
+    name: e.name,
+    api: new ServiceXApi(e.endpoint, e.token),
+  }));
 
-    return Promise.all(
-      Array.from(localByRequestId.entries()).map(([requestId, local]) => fetchOneEntry(namedApis, requestId, local))
+  const { records, corrupted } = readCacheRecords(config.cachePath);
+  if (corrupted > 0) {
+    vscode.window.showWarningMessage(
+      `ServiceX: ${corrupted} ${corrupted === 1 ? 'entry' : 'entries'} in the local cache database ` +
+        `(db.json) could not be read and ${corrupted === 1 ? 'was' : 'were'} skipped. The rest of the ` +
+        'cache loaded normally.'
     );
   }
+  const localByRequestId = new Map<string, CacheDbRecord>();
+  for (const r of [...completedRecords(records), ...submittedRecords(records)]) {
+    if (r.request_id) {
+      localByRequestId.set(r.request_id, r);
+    }
+  }
+
+  const entries = await Promise.all(
+    Array.from(localByRequestId.entries()).map(([requestId, local]) => fetchOneEntry(namedApis, requestId, local))
+  );
+  return { entries };
+}
+
+/**
+ * Entry source for the dashboard panel: every transform visible to the
+ * configured token on each backend (ServiceXApi.getAllTransforms, the same
+ * call the web dashboard itself makes), not just ones that happen to be
+ * downloaded locally - so unlike the cache panel there's no local file data
+ * (fileList/dataDir/sizeBytes/codegen) and no per-request fallback between
+ * backends, since a transform's own backend already reported it directly.
+ * Queries every configured endpoint unconditionally (regardless of the
+ * `servicex.backend` setting, which only picks a *default* for the cache
+ * panel's single-request fallback order) and tolerates one backend failing
+ * without losing the others' results.
+ */
+export const DASHBOARD_SOURCE: CacheTreeSource = {
+  fetchEntries: fetchDashboardEntries,
+  itemContextValue: 'servicexDashboardRequest',
+  groupContextValue: 'servicexDashboardTitleGroup',
+  emptyMessage: 'No transforms found on the dashboard.',
+  noMatchMessage: 'No dashboard transforms match the current filters.',
+  groupByBackend: true,
+  defaultGroupingEnabled: false,
+};
+
+/**
+ * A facility can have far more transforms on the dashboard than were ever
+ * downloaded locally, since it's every transform the token can see there -
+ * not just the user's own cache. Capping each backend to its most recent
+ * entries independently (rather than one global cap) keeps every configured
+ * facility represented instead of a single busy one crowding out the rest.
+ */
+const DASHBOARD_ENTRIES_PER_BACKEND_LIMIT = 30;
+
+function mostRecentFirst(statuses: TransformStatus[]): TransformStatus[] {
+  return [...statuses].sort((a, b) => (b.submitTime?.getTime() ?? 0) - (a.submitTime?.getTime() ?? 0));
+}
+
+async function fetchDashboardEntries(): Promise<FetchResult> {
+  const settings = vscode.workspace.getConfiguration('servicex');
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
+
+  const results = await Promise.all(
+    config.endpoints.map(async (e) => {
+      try {
+        const statuses = await new ServiceXApi(e.endpoint, e.token).getAllTransforms();
+        return {
+          name: e.name,
+          statuses: mostRecentFirst(statuses).slice(0, DASHBOARD_ENTRIES_PER_BACKEND_LIMIT),
+          error: undefined as Error | undefined,
+        };
+      } catch (err) {
+        return { name: e.name, statuses: [] as TransformStatus[], error: err as Error };
+      }
+    })
+  );
+
+  const failed = results.filter((r) => r.error);
+  if (failed.length > 0) {
+    vscode.window.showWarningMessage(
+      `ServiceX: couldn't load dashboard transforms from ${failed.map((f) => f.name).join(', ')}: ` +
+        failed.map((f) => f.error!.message).join('; ')
+    );
+  }
+
+  return {
+    entries: results.flatMap(({ name, statuses }) => statuses.map((s) => dashboardEntry(s, name))),
+    // Every configured backend, not just ones that returned entries - so
+    // BackendGroupItem can give a failed or genuinely-empty backend its own
+    // tab instead of it just disappearing from the tree.
+    backends: results.map((r) => ({ name: r.name, error: r.error?.message })),
+  };
+}
+
+function dashboardEntry(remote: TransformStatus, backend: string): CacheEntry {
+  return {
+    requestId: remote.requestId,
+    title: remote.title || 'No Title',
+    status: remote.status,
+    submitTime: remote.submitTime,
+    finishTime: remote.finishTime,
+    files: remote.files,
+    filesCompleted: remote.filesCompleted,
+    filesFailed: remote.filesFailed,
+    stale: false,
+    backend,
+    sizeBytes: 0,
+  };
 }
 
 function localFileList(local: CacheDbRecord): string[] | undefined {

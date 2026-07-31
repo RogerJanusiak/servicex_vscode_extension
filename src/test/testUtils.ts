@@ -83,9 +83,15 @@ export function stubCacheRecords(records: CacheDbRecord[] | (() => CacheDbRecord
 /** Fakes just enough of ServiceXApi to drive CacheTreeProvider.getChildren()
  *  end-to-end without any real network or filesystem access. Routes by the
  *  endpoint URL that CacheTreeProvider constructed it with; a missing id
- *  raises NotFoundError, an Error value is thrown as-is. */
+ *  raises NotFoundError, an Error value is thrown as-is.
+ *
+ *  `allTransformsData` backs getAllTransforms() (the dashboard source) the
+ *  same way `backendData` backs getTransformStatus() (the cache source) -
+ *  an endpoint with no entry returns [], and an Error value is thrown as-is
+ *  to simulate one backend failing without touching the others. */
 export function stubServiceXApi(
-  backendData: Record<string, Record<string, TransformStatus | Error>>
+  backendData: Record<string, Record<string, TransformStatus | Error>>,
+  allTransformsData: Record<string, TransformStatus[] | Error> = {}
 ): void {
   class FakeServiceXApi {
     constructor(private readonly endpoint: string) {}
@@ -94,6 +100,13 @@ export function stubServiceXApi(
       if (!result) {
         throw new NotFoundError(`${requestId} not found on ${this.endpoint}`);
       }
+      if (result instanceof Error) {
+        throw result;
+      }
+      return result;
+    }
+    async getAllTransforms(): Promise<TransformStatus[]> {
+      const result = allTransformsData[this.endpoint] ?? [];
       if (result instanceof Error) {
         throw result;
       }

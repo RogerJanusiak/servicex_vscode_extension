@@ -184,4 +184,49 @@ suite('serviceXApi.ts', () => {
       /No refresh token configured/
     );
   });
+
+  test('getAllTransforms fetches the plural endpoint and unwraps the "requests" array', async () => {
+    const { calls } = mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      {
+        status: 200,
+        body: {
+          requests: [
+            { request_id: 'req-1', status: 'Complete', files: 1, 'files-completed': 1, 'files-failed': 0 },
+            { request_id: 'req-2', status: 'Running', files: 4, 'files-completed': 2, 'files-failed': 0 },
+          ],
+        },
+      },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+    const statuses = await api.getAllTransforms();
+
+    assert.strictEqual(calls[1].url, 'https://example.org/servicex/transformation');
+    assert.strictEqual(statuses.length, 2);
+    assert.deepStrictEqual(statuses.map((s) => s.requestId), ['req-1', 'req-2']);
+    assert.strictEqual(statuses[1].status, 'Running');
+  });
+
+  test('getAllTransforms returns [] when the backend reports no requests', async () => {
+    mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 200, body: { requests: [] } },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+
+    assert.deepStrictEqual(await api.getAllTransforms(), []);
+  });
+
+  test('getAllTransforms throws a plain Error on a failure status', async () => {
+    mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 500, body: { message: 'boom' } },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+
+    await assert.rejects(() => api.getAllTransforms(), /ServiceX WebAPI error 500/);
+  });
 });

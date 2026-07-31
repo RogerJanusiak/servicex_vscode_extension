@@ -115,6 +115,12 @@ suite('extension.ts - activation', () => {
       'servicex.openSortMenu',
       'servicex.groupByTitle',
       'servicex.ungroup',
+      'servicex.refreshDashboard',
+      'servicex.openDashboardFilterMenu',
+      'servicex.clearAllDashboardFilters',
+      'servicex.openDashboardSortMenu',
+      'servicex.groupDashboardByTitle',
+      'servicex.ungroupDashboard',
     ]) {
       assert.ok(commands.includes(id), `expected command ${id} to be registered`);
     }
@@ -654,6 +660,111 @@ suite('extension.ts - command handlers', () => {
     } finally {
       fs.rmSync(cachePath, { recursive: true, force: true });
     }
+  });
+});
+
+suite('extension.ts - dashboard command handlers', () => {
+  suiteSetup(activateExtension);
+
+  // Mirrors the cache panel's teardown above: reset the dashboard panel's
+  // own shared-provider state so tests don't leak filters/grouping/sort
+  // into each other.
+  teardown(async () => {
+    restoreStubs();
+    await vscode.commands.executeCommand('servicex.clearAllDashboardFilters');
+    await vscode.commands.executeCommand('servicex.groupDashboardByTitle');
+    stub(vscode.window, 'showQuickPick', async (items: unknown) =>
+      (items as { sortBy: string; direction: string }[]).find(
+        (i) => i.sortBy === 'date' && i.direction === 'desc'
+      )
+    );
+    await vscode.commands.executeCommand('servicex.openDashboardSortMenu');
+    restoreStubs();
+  });
+
+  test('servicex.refreshDashboard and grouping/ungrouping execute cleanly', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [] });
+
+    await vscode.commands.executeCommand('servicex.refreshDashboard');
+    await vscode.commands.executeCommand('servicex.ungroupDashboard');
+    await vscode.commands.executeCommand('servicex.groupDashboardByTitle');
+  });
+
+  test('the Dashboard Filter menu shows an info message instead of the status picker when nothing has loaded', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [] });
+    await vscode.commands.executeCommand('servicex.refreshDashboard');
+
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    driveFilterMenu('status');
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+
+    assert.ok(infoMessage?.includes('No dashboard transforms to filter yet'));
+  });
+
+  test('servicex.clearAllDashboardFilters clears filters set through the Dashboard Filter menu', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' })] }
+    );
+    await vscode.commands.executeCommand('servicex.refreshDashboard');
+
+    driveFilterMenu('status', []);
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+
+    // No API to read the tree back directly (see the cache-panel note above)
+    // - clearing must simply execute without error, and a second Filter
+    // menu open should offer "All" again rather than the narrowed set.
+    let statusDescription: string | undefined;
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      statusDescription = (items as { action: string; description?: string }[]).find(
+        (i) => i.action === 'status'
+      )?.description;
+      return undefined;
+    });
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+    assert.strictEqual(statusDescription, '');
+
+    await vscode.commands.executeCommand('servicex.clearAllDashboardFilters');
+
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      statusDescription = (items as { action: string; description?: string }[]).find(
+        (i) => i.action === 'status'
+      )?.description;
+      return undefined;
+    });
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+    assert.strictEqual(statusDescription, 'All');
+  });
+
+  test('the Dashboard Sort menu offers all eight orderings, independent of the cache panel', async () => {
+    let captured: { label: string; description?: string }[] = [];
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      captured = items as { label: string; description?: string }[];
+      return undefined;
+    });
+
+    await vscode.commands.executeCommand('servicex.openDashboardSortMenu');
+
+    assert.deepStrictEqual(
+      captured.map((i) => i.label),
+      [
+        'Title (A → Z)',
+        'Title (Z → A)',
+        'Date (Newest First)',
+        'Date (Oldest First)',
+        'Total Files (Most First)',
+        'Total Files (Fewest First)',
+        'Total Size (Largest First)',
+        'Total Size (Smallest First)',
+      ]
+    );
   });
 });
 
