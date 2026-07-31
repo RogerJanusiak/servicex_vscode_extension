@@ -2,7 +2,7 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-07-30
 
 ### Added
 
