@@ -16,6 +16,7 @@ import {
   filterEntries,
   formatBytes,
   groupByTitle,
+  isTerminalStatus,
   sortEntries,
 } from '../cacheTreeProvider';
 import * as configModule from '../config';
@@ -412,6 +413,45 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
         'Backend: uchicago',
       ]
     );
+  });
+
+  test('buildRequestDetails shows a progress bar for a non-terminal status with a known file count', () => {
+    const details = buildRequestDetails(
+      makeEntry({ status: 'Running', filesCompleted: 15, filesFailed: 0, files: 20 })
+    );
+
+    assert.deepStrictEqual(
+      details.map((d) => d.label),
+      [
+        'Request ID: req',
+        'Files: Complete 15 · Failed 0 · Total 20',
+        'Progress: ███████████████░░░░░ 75% (15/20 files)',
+      ]
+    );
+  });
+
+  test('buildRequestDetails omits the progress bar for a terminal status', () => {
+    const details = buildRequestDetails(makeEntry({ status: 'Complete', filesCompleted: 20, files: 20 }));
+
+    assert.ok(!details.some((d) => d.label?.toString().startsWith('Progress:')));
+  });
+
+  test('buildRequestDetails omits the progress bar while the file count is still unknown', () => {
+    const details = buildRequestDetails(makeEntry({ status: 'Submitted', filesCompleted: 0, files: 0 }));
+
+    assert.ok(!details.some((d) => d.label?.toString().startsWith('Progress:')));
+  });
+
+  test('isTerminalStatus recognizes Complete, Canceled, Fatal, and Bad Dataset as terminal', () => {
+    for (const status of ['Complete', 'Canceled', 'Fatal', 'Bad Dataset']) {
+      assert.strictEqual(isTerminalStatus(status), true, status);
+    }
+  });
+
+  test('isTerminalStatus treats in-progress and unrecognized statuses as non-terminal', () => {
+    for (const status of ['Running', 'Submitted', 'Lookup', 'Pending Lookup', 'Something New']) {
+      assert.strictEqual(isTerminalStatus(status), false, status);
+    }
   });
 
   test('MessageItem carries only a label, optionally with an icon', () => {
@@ -1237,5 +1277,95 @@ suite('cacheTreeProvider.ts - DASHBOARD_SOURCE', () => {
     const roots = await provider.getChildren();
 
     assert.ok(roots.every((r) => !(r instanceof BackendGroupItem)));
+  });
+
+  test('a running dashboard entry gets the running contextValue; a terminal one does not', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      {
+        'https://default.example.org': [
+          fakeStatus({ requestId: 'running-1', title: 'A', status: 'Running' }),
+          fakeStatus({ requestId: 'done-1', title: 'B', status: 'Complete' }),
+        ],
+      }
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const roots = (await provider.getChildren()) as RequestItem[];
+
+    const byId = new Map(roots.map((r) => [r.entry.requestId, r]));
+    assert.strictEqual(byId.get('running-1')?.contextValue, 'servicexDashboardRequest-running');
+    assert.strictEqual(byId.get('done-1')?.contextValue, 'servicexDashboardRequest');
+  });
+
+  test('the cache panel never uses a running contextValue, even for a Running entry', async () => {
+    stubConfig();
+    stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'SUBMITTED' }]);
+    stubServiceXApi({
+      'https://default.example.org': { r1: fakeStatus({ requestId: 'r1', title: 'A', status: 'Running' }) },
+    });
+
+    const provider = new CacheTreeProvider();
+    const roots = await provider.getChildren();
+    const [entry] = (await provider.getChildren(roots[0])) as RequestItem[];
+
+    assert.strictEqual(entry.contextValue, 'servicexCacheRequest');
+  });
+
+  test('expanding a dashboard entry fetches and appends its current size', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] },
+      { sizeByRequestId: { a1: 2048 } }
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const [root] = (await provider.getChildren()) as RequestItem[];
+    const details = await provider.getChildren(root);
+
+    assert.ok(details.some((d) => (d as RequestDetailItem).label === 'Size: 2.0 KB'));
+  });
+
+  test('expanding a dashboard entry omits the size row when the backend has no capability for it', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] });
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const [root] = (await provider.getChildren()) as RequestItem[];
+    const details = await provider.getChildren(root);
+
+    assert.ok(!details.some((d) => (d as RequestDetailItem).label?.toString().startsWith('Size:')));
+  });
+
+  test('expanding a dashboard entry omits the size row (rather than erroring) when the size fetch fails', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A' })] },
+      { sizeByRequestId: { a1: new Error('boom') } }
+    );
+
+    const provider = new CacheTreeProvider(DASHBOARD_SOURCE);
+    const [root] = (await provider.getChildren()) as RequestItem[];
+    const details = await provider.getChildren(root);
+
+    assert.ok(!details.some((d) => (d as RequestDetailItem).label?.toString().startsWith('Size:')));
+  });
+
+  test('expanding a cache-panel entry never fetches size (no fetchTransformSize on that source)', async () => {
+    stubConfig();
+    stubCacheRecords([{ request_id: 'a1', title: 'A', status: 'COMPLETE' }]);
+    stubServiceXApi({
+      'https://default.example.org': { a1: fakeStatus({ requestId: 'a1', title: 'A' }) },
+    });
+
+    const provider = new CacheTreeProvider();
+    const roots = await provider.getChildren();
+    const [entry] = (await provider.getChildren(roots[0])) as RequestItem[];
+    const details = await provider.getChildren(entry);
+
+    assert.ok(!details.some((d) => (d as RequestDetailItem).label?.toString().startsWith('Size:')));
   });
 });

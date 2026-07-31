@@ -193,6 +193,33 @@ export class BackendGroupItem extends vscode.TreeItem {
 }
 
 /**
+ * Every status ServiceX reports that means "this transform will never change
+ * again." Anything else (Running, Submitted, Lookup, Pending Lookup, or any
+ * future status this doesn't know about) is treated as still in progress -
+ * that's what drives showing a progress bar and the dashboard's inline
+ * Cancel button, so an unrecognized status defaults to "assume it can still
+ * be cancelled" rather than silently hiding the action.
+ */
+const TERMINAL_STATUSES = new Set(['Complete', 'Canceled', 'Fatal', 'Bad Dataset']);
+
+export function isTerminalStatus(status: string): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
+/**
+ * Renders a fixed-width text progress bar from a file count, since a VS Code
+ * tree item has no native progress-bar widget to draw one with. Only
+ * meaningful once `total` is known to be positive - a request can report 0
+ * files while it's still figuring out what it needs to process.
+ */
+function progressBarLabel(completed: number, total: number, width = 20): string {
+  const ratio = Math.min(1, completed / total);
+  const filled = Math.round(ratio * width);
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
+  return `Progress: ${bar} ${Math.round(ratio * 100)}% (${completed}/${total} files)`;
+}
+
+/**
  * Decide which cached requests in a title group should be removed by
  * "Clean": every Cancelled or Failed request (regardless of age), plus every
  * Complete request except the most recently submitted one.
@@ -275,6 +302,9 @@ export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
       `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}`
     ),
   ];
+  if (!isTerminalStatus(entry.status) && entry.files > 0) {
+    details.push(new RequestDetailItem(progressBarLabel(entry.filesCompleted, entry.files)));
+  }
   if (entry.fileList?.length) {
     details.push(new RequestDetailItem(`Downloaded files: ${entry.fileList.length}`));
   }
@@ -319,6 +349,13 @@ export interface CacheTreeSource {
   /** contextValue stamped on every RequestItem this source produces - selects
    *  which per-request context-menu commands package.json shows for it. */
   itemContextValue: string;
+  /** contextValue stamped instead of `itemContextValue` on a RequestItem
+   *  whose entry has a non-terminal status (see isTerminalStatus) - lets
+   *  package.json show extra actions (the dashboard's inline Cancel button)
+   *  only on requests that could actually still be cancelled. Sources that
+   *  don't offer such actions (the cache panel) leave this unset, so every
+   *  RequestItem just gets `itemContextValue` regardless of status. */
+  runningItemContextValue?: string;
   /** contextValue stamped on every TitleGroupItem this source produces. */
   groupContextValue: string;
   /** Shown when there are no entries at all. */
@@ -333,6 +370,17 @@ export interface CacheTreeSource {
   /** Whether the tree groups by title initially. Defaults to true (matching
    *  the cache panel's long-standing behavior) when unset. */
   defaultGroupingEnabled?: boolean;
+  /**
+   * Fetches one entry's current output size in bytes, on demand - called
+   * only when that entry's own row is expanded (never eagerly for a whole
+   * list), since it costs a real network call the cache panel's local
+   * directorySize() doesn't. Resolves undefined when the size genuinely
+   * isn't available (backend lacks the capability, or the fetch failed) so
+   * the caller can just omit the row rather than surfacing an error for
+   * something that isn't the entry's fault. Unset for sources that have no
+   * such notion (the cache panel already shows local disk size for free).
+   */
+  fetchTransformSize?: (entry: CacheEntry) => Promise<number | undefined>;
 }
 
 export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
@@ -475,6 +523,17 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
    * from (so "Clean" still sees everything for that title/backend regardless
    * of active filters), scoped to just that backend when tabbed.
    */
+  /** The contextValue a RequestItem for this entry should carry - the
+   *  source's `runningItemContextValue` while the entry is still in
+   *  progress (if the source defines one), otherwise its plain
+   *  `itemContextValue`. */
+  private requestContextValue(entry: CacheEntry): string {
+    if (this.source.runningItemContextValue && !isTerminalStatus(entry.status)) {
+      return this.source.runningItemContextValue;
+    }
+    return this.source.itemContextValue;
+  }
+
   private buildEntryNodes(filtered: CacheEntry[], rawForGroup: CacheEntry[]): CacheNode[] {
     if (this.groupingEnabled) {
       const rawByTitle = new Map<string, CacheEntry[]>();
@@ -491,7 +550,7 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       );
     }
     return sortEntries(filtered, this.sortBy, this.sortDirection).map(
-      (e) => new RequestItem(e, { showTitle: true, contextValue: this.source.itemContextValue })
+      (e) => new RequestItem(e, { showTitle: true, contextValue: this.requestContextValue(e) })
     );
   }
 
@@ -532,10 +591,15 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       return nodes.length ? nodes : [new MessageItem(`No transforms found on ${element.backend}.`)];
     }
     if (element instanceof TitleGroupItem) {
-      return element.entries.map((e) => new RequestItem(e, { contextValue: this.source.itemContextValue }));
+      return element.entries.map((e) => new RequestItem(e, { contextValue: this.requestContextValue(e) }));
     }
     if (element instanceof RequestItem) {
-      return buildRequestDetails(element.entry);
+      const details = buildRequestDetails(element.entry);
+      const sizeBytes = await this.source.fetchTransformSize?.(element.entry);
+      if (sizeBytes !== undefined) {
+        details.push(new RequestDetailItem(`Size: ${formatBytes(sizeBytes)}`));
+      }
+      return details;
     }
     if (element) {
       return [];
@@ -626,12 +690,38 @@ async function fetchCacheEntries(): Promise<FetchResult> {
 export const DASHBOARD_SOURCE: CacheTreeSource = {
   fetchEntries: fetchDashboardEntries,
   itemContextValue: 'servicexDashboardRequest',
+  runningItemContextValue: 'servicexDashboardRequest-running',
   groupContextValue: 'servicexDashboardTitleGroup',
   emptyMessage: 'No transforms found on the dashboard.',
   noMatchMessage: 'No dashboard transforms match the current filters.',
   groupByBackend: true,
   defaultGroupingEnabled: false,
+  fetchTransformSize: fetchDashboardTransformSize,
 };
+
+/**
+ * Looks up the one entry's own backend and asks it for that transform's
+ * current size (ServiceXApi.getTransformSize) - undefined for any reason
+ * (backend no longer configured, capability missing, request failed) simply
+ * means the row shows no size, rather than an error.
+ */
+async function fetchDashboardTransformSize(entry: CacheEntry): Promise<number | undefined> {
+  if (!entry.backend) {
+    return undefined;
+  }
+  const settings = vscode.workspace.getConfiguration('servicex');
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const config = loadConfig(settings.get<string>('configPath') || undefined, workspaceFolder);
+  const endpoint = config.endpoints.find((e) => e.name === entry.backend);
+  if (!endpoint) {
+    return undefined;
+  }
+  try {
+    return await new ServiceXApi(endpoint.endpoint, endpoint.token).getTransformSize(entry.requestId);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * A facility can have far more transforms on the dashboard than were ever

@@ -370,6 +370,34 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.cancelTransform', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        `Cancel the running transform for '${item.entry.title}' (${item.entry.requestId})?`,
+        { modal: true },
+        'Cancel Transform'
+      );
+      if (confirm !== 'Cancel Transform') {
+        return;
+      }
+      const endpoint = endpointForRequest(item.entry, 'cancel the transform');
+      if (!endpoint) {
+        return;
+      }
+      try {
+        await new ServiceXApi(endpoint.endpoint, endpoint.token).cancelTransform(item.entry.requestId);
+      } catch (e) {
+        vscode.window.showErrorMessage(`Couldn't cancel ${item.entry.requestId}: ${(e as Error).message}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`Cancelled ${item.entry.requestId}.`);
+      dashboardTreeProvider.refresh();
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('servicex.deleteFromCache', async (item: RequestItem) => {
       if (!item) {
         return;

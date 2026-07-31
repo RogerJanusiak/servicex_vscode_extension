@@ -121,6 +121,7 @@ suite('extension.ts - activation', () => {
       'servicex.openDashboardSortMenu',
       'servicex.groupDashboardByTitle',
       'servicex.ungroupDashboard',
+      'servicex.cancelTransform',
     ]) {
       assert.ok(commands.includes(id), `expected command ${id} to be registered`);
     }
@@ -765,6 +766,84 @@ suite('extension.ts - dashboard command handlers', () => {
         'Total Size (Smallest First)',
       ]
     );
+  });
+
+  test('servicex.cancelTransform does nothing when the user dismisses the confirmation', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => undefined);
+    let cancelCalled = false;
+    stubServiceXApi({}, {}, { onCancel: () => (cancelCalled = true) });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(cancelCalled, false);
+  });
+
+  test('servicex.cancelTransform cancels and refreshes the dashboard tree when confirmed', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Cancel Transform');
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    let cancelledId: string | undefined;
+    stubServiceXApi({}, {}, { onCancel: (requestId) => (cancelledId = requestId) });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(cancelledId, 'req-1');
+    assert.ok(infoMessage?.includes('Cancelled req-1'));
+  });
+
+  test('servicex.cancelTransform shows an error instead of an info message when the cancel call fails', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Cancel Transform');
+    let errorMessage: string | undefined;
+    stub(vscode.window, 'showErrorMessage', (msg: string) => {
+      errorMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    let infoCalled = false;
+    stub(vscode.window, 'showInformationMessage', () => {
+      infoCalled = true;
+      return Promise.resolve(undefined);
+    });
+    stubServiceXApi({}, {}, { cancelErrorByRequestId: { 'req-1': new Error('ServiceX WebAPI error 500') } });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(infoCalled, false);
+    assert.ok(errorMessage?.includes("Couldn't cancel req-1"));
+    assert.ok(errorMessage?.includes('ServiceX WebAPI error 500'));
+  });
+
+  test('servicex.cancelTransform shows an info message instead of cancelling when the entry has no known backend', async () => {
+    let cancelCalled = false;
+    stubServiceXApi({}, {}, { onCancel: () => (cancelCalled = true) });
+    stub(vscode.window, 'showWarningMessage', async () => 'Cancel Transform');
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-stale', backend: undefined, status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(cancelCalled, false);
+    assert.ok(infoMessage?.includes("Can't cancel the transform for req-stale"));
   });
 });
 

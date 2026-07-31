@@ -229,4 +229,103 @@ suite('serviceXApi.ts', () => {
 
     await assert.rejects(() => api.getAllTransforms(), /ServiceX WebAPI error 500/);
   });
+
+  test('cancelTransform hits the /cancel endpoint', async () => {
+    const { calls } = mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 200, body: {} },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+    await api.cancelTransform('req-1');
+
+    assert.strictEqual(calls[1].url, 'https://example.org/servicex/transformation/req-1/cancel');
+  });
+
+  test('cancelTransform throws NotFoundError on a 404', async () => {
+    mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 404, body: {} },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+
+    await assert.rejects(() => api.cancelTransform('req-1'), NotFoundError);
+  });
+
+  test('cancelTransform throws a plain Error on other failure statuses', async () => {
+    mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 500, body: {} },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+
+    await assert.rejects(() => api.cancelTransform('req-1'), /ServiceX WebAPI error 500/);
+  });
+
+  test('getTransformSize sums total-bytes from successful results when the backend has the capability', async () => {
+    const { calls } = mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 200, body: { capabilities: ['poll_local_transformation_results'] } },
+      {
+        status: 200,
+        body: {
+          results: [
+            { 's3-object-name': 'a.root', 'total-bytes': 100, transform_status: 'success' },
+            { 's3-object-name': 'b.root', 'total-bytes': 250, transform_status: 'success' },
+            { 's3-object-name': 'c.root', 'total-bytes': 999, transform_status: 'failure' },
+          ],
+        },
+      },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+    const size = await api.getTransformSize('req-1');
+
+    assert.strictEqual(calls[1].url, 'https://example.org/servicex');
+    assert.strictEqual(calls[2].url, 'https://example.org/servicex/transformation/req-1/results');
+    assert.strictEqual(size, 350);
+  });
+
+  test('getTransformSize returns undefined without fetching results when the capability is missing', async () => {
+    const { calls } = mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 200, body: { capabilities: [] } },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+    const size = await api.getTransformSize('req-1');
+
+    assert.strictEqual(size, undefined);
+    assert.strictEqual(calls.length, 2, 'must not call /results when the capability is missing');
+  });
+
+  test('getTransformSize only checks capabilities once across multiple calls', async () => {
+    const { calls } = mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 200, body: { capabilities: ['poll_local_transformation_results'] } },
+      { status: 200, body: { results: [] } },
+      { status: 200, body: { results: [] } },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+    await api.getTransformSize('req-1');
+    await api.getTransformSize('req-2');
+
+    const capabilityCalls = calls.filter((c) => c.url.endsWith('/servicex'));
+    assert.strictEqual(capabilityCalls.length, 1);
+  });
+
+  test('getTransformSize throws a plain Error when the results fetch itself fails', async () => {
+    mockFetch([
+      { status: 200, body: { access_token: makeJwt(Date.now() / 1000 + 3600) } },
+      { status: 200, body: { capabilities: ['poll_local_transformation_results'] } },
+      { status: 500, body: {} },
+    ]);
+
+    const api = new ServiceXApi('https://example.org', 'refresh-token');
+
+    await assert.rejects(() => api.getTransformSize('req-1'), /ServiceX WebAPI error 500/);
+  });
 });

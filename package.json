@@ -126,6 +126,11 @@
         "command": "servicex.ungroupDashboard",
         "title": "ServiceX: Ungroup Dashboard",
         "icon": "$(list-flat)"
+      },
+      {
+        "command": "servicex.cancelTransform",
+        "title": "ServiceX: Cancel Transform",
+        "icon": "$(stop-circle)"
       }
     ],
     "viewsContainers": {
@@ -260,18 +265,23 @@
         },
         {
           "command": "servicex.copyRequestId",
-          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest",
+          "when": "view == servicexDashboardView && viewItem =~ /^servicexDashboardRequest/",
           "group": "1_copy@1"
         },
         {
           "command": "servicex.showQuery",
-          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest",
+          "when": "view == servicexDashboardView && viewItem =~ /^servicexDashboardRequest/",
           "group": "2_open@1"
         },
         {
           "command": "servicex.openDashboard",
-          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest",
+          "when": "view == servicexDashboardView && viewItem =~ /^servicexDashboardRequest/",
           "group": "2_open@2"
+        },
+        {
+          "command": "servicex.cancelTransform",
+          "when": "view == servicexDashboardView && viewItem == servicexDashboardRequest-running",
+          "group": "inline"
         }
       ]
     },
