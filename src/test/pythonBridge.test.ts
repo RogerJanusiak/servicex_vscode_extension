@@ -43,7 +43,13 @@ const SCRIPTS: Record<string, string> = {
 
 const MISSING_INTERPRETER = 'servicex-test-no-such-interpreter';
 
-suite('pythonBridge.ts - decodeQastle', () => {
+suite('pythonBridge.ts - decodeQastle', function () {
+  // Every test here spawns a real interpreter. That's ~45ms locally, but the
+  // first spawn on a cold macOS CI runner has taken over mocha's 2s default
+  // on its own, so give the whole suite room rather than have it fail for
+  // reasons that have nothing to do with the code under test.
+  this.timeout(30_000);
+
   let scriptDir: string;
 
   suiteSetup(() => {
