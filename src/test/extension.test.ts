@@ -122,6 +122,8 @@ suite('extension.ts - activation', () => {
       'servicex.groupDashboardByTitle',
       'servicex.ungroupDashboard',
       'servicex.cancelTransform',
+      'servicex.deleteAllCache',
+      'servicex.cleanAllGroups',
     ]) {
       assert.ok(commands.includes(id), `expected command ${id} to be registered`);
     }
@@ -458,6 +460,124 @@ suite('extension.ts - command handlers', () => {
     // db.json record is included rather than silently skipped.
     assert.deepStrictEqual(deletedIds, ['a', 'b', 'c']);
     assert.ok(infoMessage?.includes('Deleted 3 cached request(s)'));
+  });
+
+  test('servicex.deleteAllCache deletes every loaded entry when confirmed', async () => {
+    await loadFakeCache();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.deleteAllCache');
+
+    assert.deepStrictEqual(deletedIds.sort(), ['t1', 'u1']);
+    assert.ok(infoMessage?.includes('Deleted 2 cached request(s)'));
+  });
+
+  test('servicex.deleteAllCache does nothing when the user dismisses the confirmation', async () => {
+    await loadFakeCache();
+    stub(vscode.window, 'showWarningMessage', async () => undefined);
+    let deleteCalled = false;
+    stub(cacheDbModule, 'deleteCacheRecord', () => {
+      deleteCalled = true;
+      return true;
+    });
+
+    await vscode.commands.executeCommand('servicex.deleteAllCache');
+
+    assert.strictEqual(deleteCalled, false);
+  });
+
+  test('servicex.deleteAllCache reports an already-empty cache instead of prompting', async () => {
+    stubConfig();
+    stubCacheRecords([]);
+    stubServiceXApi({});
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    let warned = false;
+    stub(vscode.window, 'showWarningMessage', async () => {
+      warned = true;
+      return undefined;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.deleteAllCache');
+
+    assert.strictEqual(warned, false, 'must not prompt when there is nothing to delete');
+    assert.ok(infoMessage?.includes('already empty'));
+  });
+
+  test('servicex.cleanAllGroups deletes only what each group\'s clean plan selects', async () => {
+    // Two titles: "Keep" has a newer and an older Complete (older should go,
+    // newer stays), "Gone" is Canceled (always goes).
+    stubConfig();
+    stubCacheRecords([
+      { request_id: 'newer', title: 'Keep', status: 'COMPLETE' },
+      { request_id: 'older', title: 'Keep', status: 'COMPLETE' },
+      { request_id: 'cancelled', title: 'Gone', status: 'CANCELED' },
+    ]);
+    stubServiceXApi({
+      'https://default.example.org': {
+        newer: fakeStatus({ requestId: 'newer', title: 'Keep', submitTime: new Date(500) }),
+        older: fakeStatus({ requestId: 'older', title: 'Keep', submitTime: new Date(100) }),
+        cancelled: fakeStatus({ requestId: 'cancelled', title: 'Gone', status: 'Canceled' }),
+      },
+    });
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    stub(vscode.window, 'showWarningMessage', async () => 'Clean');
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.cleanAllGroups');
+
+    assert.deepStrictEqual(deletedIds.sort(), ['cancelled', 'older']);
+    assert.ok(infoMessage?.includes('Cleaned 2 cached request(s)'));
+  });
+
+  test('servicex.cleanAllGroups reports nothing to clean when every group is already tidy', async () => {
+    stubConfig();
+    stubCacheRecords([{ request_id: 'only', title: 'Solo', status: 'COMPLETE' }]);
+    stubServiceXApi({
+      'https://default.example.org': { only: fakeStatus({ requestId: 'only', title: 'Solo' }) },
+    });
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    let warned = false;
+    stub(vscode.window, 'showWarningMessage', async () => {
+      warned = true;
+      return undefined;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.cleanAllGroups');
+
+    assert.strictEqual(warned, false, 'must not prompt when there is nothing to clean');
+    assert.ok(infoMessage?.includes('Nothing to clean'));
   });
 
   test('servicex.deleteGroup deletes the full unfiltered group, not just the visible rows', async () => {

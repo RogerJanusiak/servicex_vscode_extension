@@ -131,6 +131,16 @@
         "command": "servicex.cancelTransform",
         "title": "ServiceX: Cancel Transform",
         "icon": "$(stop-circle)"
+      },
+      {
+        "command": "servicex.deleteAllCache",
+        "title": "ServiceX: Delete All Cached Transforms",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "servicex.cleanAllGroups",
+        "title": "ServiceX: Clean All Groups",
+        "icon": "$(clear-all)"
       }
     ],
     "viewsContainers": {
@@ -190,6 +200,16 @@
           "command": "servicex.openCacheRootFolder",
           "when": "view == servicexCacheView",
           "group": "2_folder"
+        },
+        {
+          "command": "servicex.cleanAllGroups",
+          "when": "view == servicexCacheView",
+          "group": "3_danger@1"
+        },
+        {
+          "command": "servicex.deleteAllCache",
+          "when": "view == servicexCacheView",
+          "group": "3_danger@2"
         },
         {
           "command": "servicex.openDashboardFilterMenu",

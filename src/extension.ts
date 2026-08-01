@@ -10,6 +10,7 @@ import {
   computeCleanPlan,
   formatBytes,
   getServiceXApi,
+  groupByTitle,
   isTerminalStatus,
   FailureFilter,
   SortBy,
@@ -418,6 +419,82 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('servicex.openCacheRootFolder', async () => {
       await openFolderInNewWindow(resolveConfig().cachePath);
+    })
+  );
+
+  /**
+   * Removes every cached request - the whole panel, not just what a filter
+   * currently shows (hence getEntries() rather than the visible rows), which
+   * includes cancelled/failed requests that exist only as a directory on
+   * disk with no db.json record.
+   */
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.deleteAllCache', async () => {
+      await cacheTreeProvider.ensureLoaded();
+      const entries = cacheTreeProvider.getEntries();
+      if (entries.length === 0) {
+        vscode.window.showInformationMessage('The ServiceX cache is already empty.');
+        return;
+      }
+      const totalSize = entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+      const confirm = await vscode.window.showWarningMessage(
+        `Delete ALL ${entries.length} cached request(s)` +
+          (totalSize > 0 ? `, freeing ${formatBytes(totalSize)}` : '') +
+          '? This cannot be undone.',
+        { modal: true },
+        'Delete All'
+      );
+      if (confirm !== 'Delete All') {
+        return;
+      }
+      const cachePath = resolveCachePath();
+      let count = 0;
+      for (const entry of entries) {
+        if (deleteCacheRecord(cachePath, entry.requestId)) {
+          count++;
+        }
+      }
+      vscode.window.showInformationMessage(`Deleted ${count} cached request(s).`);
+      cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
+    })
+  );
+
+  /**
+   * Runs the same per-group "Clean" plan across every group at once: keeps
+   * each title's most recent completed request and drops the rest, along
+   * with every cancelled/failed one.
+   */
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.cleanAllGroups', async () => {
+      await cacheTreeProvider.ensureLoaded();
+      const toDelete = groupByTitle(cacheTreeProvider.getEntries()).flatMap((g) => computeCleanPlan(g.entries));
+      if (toDelete.length === 0) {
+        vscode.window.showInformationMessage('Nothing to clean - every group is already tidy.');
+        return;
+      }
+      const totalSize = toDelete.reduce((sum, e) => sum + e.sizeBytes, 0);
+      const confirm = await vscode.window.showWarningMessage(
+        `Clean ${toDelete.length} cached request(s) across all groups` +
+          (totalSize > 0 ? `, freeing ${formatBytes(totalSize)}` : '') +
+          ' (older completed runs plus any cancelled or failed ones), keeping each title\'s most recent ' +
+          'completed request?',
+        { modal: true },
+        'Clean'
+      );
+      if (confirm !== 'Clean') {
+        return;
+      }
+      const cachePath = resolveCachePath();
+      let count = 0;
+      for (const entry of toDelete) {
+        if (deleteCacheRecord(cachePath, entry.requestId)) {
+          count++;
+        }
+      }
+      vscode.window.showInformationMessage(`Cleaned ${count} cached request(s).`);
+      cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
     })
   );
 

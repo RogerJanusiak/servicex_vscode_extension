@@ -494,6 +494,13 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
     }
   }
 
+  /** Every currently loaded entry, ignoring any active filter - for
+   *  whole-cache operations ("Delete All", "Clean All Groups") that must act
+   *  on everything present, not just what happens to be visible. */
+  getEntries(): CacheEntry[] {
+    return this.rawEntries;
+  }
+
   /** Distinct statuses among the currently loaded entries, for building a filter picker. */
   getAvailableStatuses(): string[] {
     return Array.from(new Set(this.rawEntries.map((e) => e.status))).sort();
