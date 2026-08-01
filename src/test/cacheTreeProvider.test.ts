@@ -750,10 +750,9 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
       assert.strictEqual(item.entry.sizeBytes, 512);
       assert.strictEqual(item.entry.downloadedFiles, 1);
 
-      // ...and its downloaded files are listed when expanded, read off disk
-      // rather than from the (nonexistent) record's file_list.
+      // ...and its downloaded-file count comes from disk rather than from
+      // the (nonexistent) record's file_list.
       const details = await provider.getChildren(item);
-      assert.ok(details.some((d) => (d as RequestDetailItem).label === 'partial.root'));
       assert.ok(details.some((d) => (d as RequestDetailItem).label === 'Downloaded files: 1'));
     } finally {
       fs.rmSync(cachePath, { recursive: true, force: true });

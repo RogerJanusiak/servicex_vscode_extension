@@ -10,7 +10,6 @@ import {
   directorySize,
   directoryStats,
   listCacheDirectories,
-  listDirectoryFiles,
 } from '../cacheDb';
 
 function mkTmpDir(): string {
@@ -258,20 +257,6 @@ suite('cacheDb.ts', () => {
 
   test('listCacheDirectories returns [] for a cache directory that does not exist', () => {
     assert.deepStrictEqual(listCacheDirectories(path.join(cachePath, 'nope')), []);
-  });
-
-  test('listDirectoryFiles lists files relative to the directory, recursing and sorted', () => {
-    const nested = path.join(cachePath, 'sub');
-    fs.mkdirSync(nested, { recursive: true });
-    fs.writeFileSync(path.join(cachePath, 'b.root'), 'x');
-    fs.writeFileSync(path.join(cachePath, 'a.root'), 'x');
-    fs.writeFileSync(path.join(nested, 'deep.root'), 'x');
-
-    assert.deepStrictEqual(listDirectoryFiles(cachePath), ['a.root', 'b.root', 'sub/deep.root']);
-  });
-
-  test('listDirectoryFiles returns [] for a directory that does not exist', () => {
-    assert.deepStrictEqual(listDirectoryFiles(path.join(cachePath, 'nope')), []);
   });
 
   test('deleteCacheRecord removes a derived directory that has no db.json record at all', () => {

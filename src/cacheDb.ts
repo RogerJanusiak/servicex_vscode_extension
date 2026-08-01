@@ -202,33 +202,6 @@ export function deleteCacheRecord(cachePath: string, requestId: string): boolean
   return found;
 }
 
-/**
- * Every regular file under `dirPath`, recursively, as paths relative to it -
- * what's actually been downloaded for a request, read from disk rather than
- * from the db.json record's file_list (which doesn't exist at all for a
- * still-running request, or for a cancelled one whose record is gone).
- * Sorted for a stable display order; empty for a path that doesn't exist.
- */
-export function listDirectoryFiles(dirPath: string, prefix = ''): string[] {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  const files: string[] = [];
-  for (const entry of entries) {
-    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) {
-      files.push(...listDirectoryFiles(path.join(dirPath, entry.name), relative));
-    } else if (entry.isFile()) {
-      files.push(relative);
-    }
-  }
-  return files.sort();
-}
-
 export interface DirectoryStats {
   sizeBytes: number;
   fileCount: number;

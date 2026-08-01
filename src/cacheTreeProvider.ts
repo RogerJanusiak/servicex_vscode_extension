@@ -8,7 +8,6 @@ import {
   submittedRecords,
   directoryStats,
   listCacheDirectories,
-  listDirectoryFiles,
   CacheDbRecord,
 } from './cacheDb';
 
@@ -346,11 +345,8 @@ export class RequestItem extends vscode.TreeItem {
 
 /** A single read-only fact about a request - shown as a child when its RequestItem is expanded. */
 export class RequestDetailItem extends vscode.TreeItem {
-  constructor(label: string, icon?: string) {
+  constructor(label: string) {
     super(label, vscode.TreeItemCollapsibleState.None);
-    if (icon) {
-      this.iconPath = new vscode.ThemeIcon(icon);
-    }
     this.contextValue = 'servicexRequestDetail';
   }
 }
@@ -361,7 +357,7 @@ export class RequestDetailItem extends vscode.TreeItem {
  * size/backend/downloaded-files only when there's something to say.
  */
 export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
-  const details = [
+  const details: RequestDetailItem[] = [
     new RequestDetailItem(`Request ID: ${entry.requestId}`),
     new RequestDetailItem(
       `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}`
@@ -712,14 +708,6 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       const sizeBytes = await this.source.fetchTransformSize?.(current);
       if (sizeBytes !== undefined) {
         details.push(new RequestDetailItem(`Size: ${formatBytes(sizeBytes)}`));
-      }
-      // Read straight off disk, and only for the one row being expanded -
-      // shows what's actually downloaded even for a request with no db.json
-      // record left (a cancelled one), which entry.fileList can't.
-      if (current.dataDir) {
-        for (const file of listDirectoryFiles(current.dataDir)) {
-          details.push(new RequestDetailItem(file, 'file'));
-        }
       }
       return details;
     }
