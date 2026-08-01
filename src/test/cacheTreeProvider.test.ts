@@ -715,6 +715,104 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     }
   });
 
+  test('lists a directory with no db.json record at all, resolving its real title/status from the backend', async () => {
+    // The cancelled-transform case: the client made <cache_path>/<id> but
+    // never wrote a record, so before this the directory was invisible to
+    // the panel (and undeletable). The directory name IS the request id, so
+    // the backend can still say what it was.
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-orphan-test-'));
+    try {
+      fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+      const orphanDir = path.join(cachePath, 'cancelled-1');
+      fs.mkdirSync(orphanDir, { recursive: true });
+      fs.writeFileSync(path.join(orphanDir, 'partial.root'), 'x'.repeat(512));
+
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          'cancelled-1': fakeStatus({ requestId: 'cancelled-1', title: 'MyQuery', status: 'Canceled' }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const [item] = (await provider.getChildren(roots[0])) as RequestItem[];
+
+      assert.strictEqual(item.entry.requestId, 'cancelled-1');
+      assert.strictEqual(item.entry.title, 'MyQuery');
+      assert.strictEqual(item.entry.status, 'Canceled');
+      assert.strictEqual(item.entry.sizeBytes, 512);
+      assert.strictEqual(item.entry.downloadedFiles, 1);
+
+      // ...and its downloaded files are listed when expanded, read off disk
+      // rather than from the (nonexistent) record's file_list.
+      const details = await provider.getChildren(item);
+      assert.ok(details.some((d) => (d as RequestDetailItem).label === 'partial.root'));
+      assert.ok(details.some((d) => (d as RequestDetailItem).label === 'Downloaded files: 1'));
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
+  });
+
+  test('a directory whose request the backend no longer knows still shows, marked stale', async () => {
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-orphan-unknown-'));
+    try {
+      fs.mkdirSync(path.join(cachePath, 'long-gone'), { recursive: true });
+
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([]);
+      stubServiceXApi({ 'https://default.example.org': {} });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const [item] = (await provider.getChildren(roots[0])) as RequestItem[];
+
+      assert.strictEqual(item.entry.requestId, 'long-gone');
+      assert.strictEqual(item.entry.stale, true);
+      assert.strictEqual(item.entry.status, 'Not found on any backend');
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
+  });
+
+  test('a directory that also has a db.json record is listed once, not twice', async () => {
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-dedupe-test-'));
+    try {
+      fs.mkdirSync(path.join(cachePath, 'r1'), { recursive: true });
+
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'COMPLETE' }]);
+      stubServiceXApi({
+        'https://default.example.org': { r1: fakeStatus({ requestId: 'r1', title: 'A' }) },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const entries = (await provider.getChildren(roots[0])) as RequestItem[];
+
+      assert.strictEqual(roots.length, 1);
+      assert.strictEqual(entries.length, 1);
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
+  });
+
   test('surfaces a non-NotFound backend error directly instead of trying other backends', async () => {
     stubConfig([
       { name: 'primary', endpoint: 'https://primary.example.org', token: 't1' },

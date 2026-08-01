@@ -2,7 +2,15 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { loadConfig, orderedEndpoints, EndpointConfig } from './config';
 import { ServiceXApi, NotFoundError, TransformStatus } from './serviceXApi';
-import { readCacheRecords, completedRecords, submittedRecords, directoryStats, CacheDbRecord } from './cacheDb';
+import {
+  readCacheRecords,
+  completedRecords,
+  submittedRecords,
+  directoryStats,
+  listCacheDirectories,
+  listDirectoryFiles,
+  CacheDbRecord,
+} from './cacheDb';
 
 const apiInstances = new Map<string, ServiceXApi>();
 
@@ -338,8 +346,11 @@ export class RequestItem extends vscode.TreeItem {
 
 /** A single read-only fact about a request - shown as a child when its RequestItem is expanded. */
 export class RequestDetailItem extends vscode.TreeItem {
-  constructor(label: string) {
+  constructor(label: string, icon?: string) {
     super(label, vscode.TreeItemCollapsibleState.None);
+    if (icon) {
+      this.iconPath = new vscode.ThemeIcon(icon);
+    }
     this.contextValue = 'servicexRequestDetail';
   }
 }
@@ -367,8 +378,12 @@ export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
         : new RequestDetailItem(progressBarLabel(entry.filesCompleted, entry.files))
     );
   }
-  if (entry.fileList?.length) {
-    details.push(new RequestDetailItem(`Downloaded files: ${entry.fileList.length}`));
+  // Prefer the count read from disk over the record's file_list: the record
+  // has none at all for a still-running request, or for a cancelled one
+  // whose record is gone entirely.
+  const downloaded = entry.downloadedFiles ?? entry.fileList?.length ?? 0;
+  if (downloaded > 0) {
+    details.push(new RequestDetailItem(`Downloaded files: ${downloaded}`));
   }
   if (entry.sizeBytes > 0) {
     details.push(new RequestDetailItem(`Size on disk: ${formatBytes(entry.sizeBytes)}`));
@@ -691,6 +706,14 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
       if (sizeBytes !== undefined) {
         details.push(new RequestDetailItem(`Size: ${formatBytes(sizeBytes)}`));
       }
+      // Read straight off disk, and only for the one row being expanded -
+      // shows what's actually downloaded even for a request with no db.json
+      // record left (a cancelled one), which entry.fileList can't.
+      if (current.dataDir) {
+        for (const file of listDirectoryFiles(current.dataDir)) {
+          details.push(new RequestDetailItem(file, 'file'));
+        }
+      }
       return details;
     }
     if (element) {
@@ -758,6 +781,18 @@ async function fetchCacheEntries(): Promise<FetchResult> {
   for (const r of [...completedRecords(records), ...submittedRecords(records)]) {
     if (r.request_id) {
       localByRequestId.set(r.request_id, r);
+    }
+  }
+  // Every directory the client has created, not just the ones db.json still
+  // knows about: a cancelled or failed transform leaves its download
+  // directory behind with no record at all, and listing those is the only
+  // way they can be seen (and deleted) rather than silently taking up disk
+  // forever. Each directory is named for its request id, so the backend can
+  // still be asked what it was - a cancelled one comes back with its real
+  // title and "Canceled" status rather than reading as a bare uuid.
+  for (const requestId of listCacheDirectories(config.cachePath)) {
+    if (!localByRequestId.has(requestId)) {
+      localByRequestId.set(requestId, {});
     }
   }
 

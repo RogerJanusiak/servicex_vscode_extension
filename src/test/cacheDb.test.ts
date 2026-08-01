@@ -7,9 +7,10 @@ import {
   completedRecords,
   submittedRecords,
   deleteCacheRecord,
-  deleteAllForTitle,
   directorySize,
   directoryStats,
+  listCacheDirectories,
+  listDirectoryFiles,
 } from '../cacheDb';
 
 function mkTmpDir(): string {
@@ -177,7 +178,10 @@ suite('cacheDb.ts', () => {
     assert.strictEqual(deleteCacheRecord(cachePath, 'anything'), false);
   });
 
-  test('deleteAllForTitle removes every record under a title, completed or submitted, leaves other titles', () => {
+  test('deleting each request in a group removes only that group, leaving other titles alone', () => {
+    // "Delete Entire Group" is driven by the group's own tree entries and
+    // calls deleteCacheRecord per request id (a title lookup into db.json
+    // can't see a cancelled request, which has a directory but no record).
     const dirOld = path.join(cachePath, 'old');
     const dirNew = path.join(cachePath, 'new');
     const dirOther = path.join(cachePath, 'other');
@@ -188,7 +192,7 @@ suite('cacheDb.ts', () => {
       '4': { request_id: 'other', title: 'GroupB', status: 'COMPLETE', data_dir: dirOther },
     });
 
-    const count = deleteAllForTitle(cachePath, 'GroupA');
+    const count = ['old', 'new', 'submitted'].filter((id) => deleteCacheRecord(cachePath, id)).length;
 
     assert.strictEqual(count, 3);
     assert.strictEqual(fs.existsSync(dirOld), false);
@@ -241,5 +245,66 @@ suite('cacheDb.ts', () => {
     fs.writeFileSync(path.join(nested, 'deep.root'), 'x'.repeat(30));
 
     assert.deepStrictEqual(directoryStats(cachePath), { sizeBytes: 60, fileCount: 3 });
+  });
+
+  test('listCacheDirectories returns every request directory, skipping .servicex and loose files', () => {
+    fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+    fs.mkdirSync(path.join(cachePath, 'req-a'), { recursive: true });
+    fs.mkdirSync(path.join(cachePath, 'req-b'), { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'stray.txt'), 'x');
+
+    assert.deepStrictEqual(listCacheDirectories(cachePath).sort(), ['req-a', 'req-b']);
+  });
+
+  test('listCacheDirectories returns [] for a cache directory that does not exist', () => {
+    assert.deepStrictEqual(listCacheDirectories(path.join(cachePath, 'nope')), []);
+  });
+
+  test('listDirectoryFiles lists files relative to the directory, recursing and sorted', () => {
+    const nested = path.join(cachePath, 'sub');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'b.root'), 'x');
+    fs.writeFileSync(path.join(cachePath, 'a.root'), 'x');
+    fs.writeFileSync(path.join(nested, 'deep.root'), 'x');
+
+    assert.deepStrictEqual(listDirectoryFiles(cachePath), ['a.root', 'b.root', 'sub/deep.root']);
+  });
+
+  test('listDirectoryFiles returns [] for a directory that does not exist', () => {
+    assert.deepStrictEqual(listDirectoryFiles(path.join(cachePath, 'nope')), []);
+  });
+
+  test('deleteCacheRecord removes a derived directory that has no db.json record at all', () => {
+    // A cancelled/failed transform: the client created its directory but
+    // never wrote a record, so before this there was no way to delete it.
+    fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+    fs.writeFileSync(path.join(cachePath, '.servicex', 'db.json'), JSON.stringify({ _default: {} }));
+    const orphanDir = path.join(cachePath, 'orphan-1');
+    fs.mkdirSync(orphanDir, { recursive: true });
+    fs.writeFileSync(path.join(orphanDir, 'partial.root'), 'x');
+
+    const deleted = deleteCacheRecord(cachePath, 'orphan-1');
+
+    assert.strictEqual(deleted, true);
+    assert.strictEqual(fs.existsSync(orphanDir), false);
+  });
+
+  test('deleteCacheRecord removes the derived directory for a SUBMITTED record with no data_dir', () => {
+    buildFixture(cachePath, { '1': { request_id: 'req-a', title: 'A', status: 'SUBMITTED' } });
+    const derivedDir = path.join(cachePath, 'req-a');
+    fs.mkdirSync(derivedDir, { recursive: true });
+    fs.writeFileSync(path.join(derivedDir, 'partial.root'), 'x');
+
+    const deleted = deleteCacheRecord(cachePath, 'req-a');
+
+    assert.strictEqual(deleted, true);
+    assert.strictEqual(fs.existsSync(derivedDir), false);
+    assert.deepStrictEqual(readCacheRecords(cachePath).records, []);
+  });
+
+  test('deleteCacheRecord still returns false when there is nothing on disk and no record', () => {
+    buildFixture(cachePath, { '1': { request_id: 'req-a', title: 'A', status: 'COMPLETE' } });
+
+    assert.strictEqual(deleteCacheRecord(cachePath, 'does-not-exist'), false);
   });
 });

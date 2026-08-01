@@ -16,7 +16,7 @@ import {
   SortDirection,
 } from './cacheTreeProvider';
 import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
-import { deleteCacheRecord, deleteAllForTitle, directorySize, directoryStats } from './cacheDb';
+import { deleteCacheRecord, directorySize, directoryStats } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
 import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
 import {
@@ -706,15 +706,30 @@ export function activate(context: vscode.ExtensionContext) {
       if (!item) {
         return;
       }
+      const filterWarning = cacheTreeProvider.hasActiveFilter()
+        ? ' A filter is currently active - this will still remove every request for ' +
+          "this title, including ones that aren't shown right now."
+        : '';
       const confirm = await vscode.window.showWarningMessage(
-        `Delete ALL ${item.entries.length} cached request(s) for '${item.title}'? This cannot be undone.`,
+        `Delete ALL ${item.allEntries.length} cached request(s) for '${item.title}'? This cannot be undone.` +
+          filterWarning,
         { modal: true },
         'Delete All'
       );
       if (confirm !== 'Delete All') {
         return;
       }
-      const count = deleteAllForTitle(resolveCachePath(), item.title);
+      // Driven by the group's own entries rather than a db.json title
+      // lookup: a cancelled request has no db.json record at all (only a
+      // directory on disk), so a record-based lookup silently skipped it -
+      // and skipped the whole group when db.json had no records to match.
+      const cachePath = resolveCachePath();
+      let count = 0;
+      for (const entry of item.allEntries) {
+        if (deleteCacheRecord(cachePath, entry.requestId)) {
+          count++;
+        }
+      }
       vscode.window.showInformationMessage(`Deleted ${count} cached request(s) for '${item.title}'.`);
       cacheTreeProvider.refresh();
       updateCacheSizeLabel();

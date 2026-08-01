@@ -433,13 +433,13 @@ suite('extension.ts - command handlers', () => {
     await vscode.commands.executeCommand('servicex.groupByTitle');
   });
 
-  test('servicex.deleteGroup deletes every request in the group when confirmed', async () => {
+  test('servicex.deleteGroup deletes every request in the group by id when confirmed', async () => {
     stubConfig();
     stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
-    let deletedTitle: string | undefined;
-    stub(cacheDbModule, 'deleteAllForTitle', (_cachePath: string, title: string) => {
-      deletedTitle = title;
-      return 3;
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
     });
     let infoMessage: string | undefined;
     stub(vscode.window, 'showInformationMessage', (msg: string) => {
@@ -447,11 +447,39 @@ suite('extension.ts - command handlers', () => {
       return Promise.resolve(undefined);
     });
 
-    const group = new TitleGroupItem('MyTitle', [makeEntry(), makeEntry(), makeEntry()]);
+    const group = new TitleGroupItem('MyTitle', [
+      makeEntry({ requestId: 'a' }),
+      makeEntry({ requestId: 'b' }),
+      makeEntry({ requestId: 'c' }),
+    ]);
     await vscode.commands.executeCommand('servicex.deleteGroup', group);
 
-    assert.strictEqual(deletedTitle, 'MyTitle');
+    // Deletes by request id, so a cancelled request with a directory but no
+    // db.json record is included rather than silently skipped.
+    assert.deepStrictEqual(deletedIds, ['a', 'b', 'c']);
     assert.ok(infoMessage?.includes('Deleted 3 cached request(s)'));
+  });
+
+  test('servicex.deleteGroup deletes the full unfiltered group, not just the visible rows', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
+    });
+    stub(vscode.window, 'showInformationMessage', () => Promise.resolve(undefined));
+
+    // entries (visible) is a subset of allEntries (the whole group) - the
+    // "Delete ALL" wording has to mean the whole group.
+    const visible = [makeEntry({ requestId: 'a' })];
+    const all = [makeEntry({ requestId: 'a' }), makeEntry({ requestId: 'hidden-by-filter' })];
+    await vscode.commands.executeCommand(
+      'servicex.deleteGroup',
+      new TitleGroupItem('MyTitle', visible, all)
+    );
+
+    assert.deepStrictEqual(deletedIds, ['a', 'hidden-by-filter']);
   });
 
   // vscode.env.clipboard is a genuinely frozen object at runtime (unlike

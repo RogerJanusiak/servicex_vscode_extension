@@ -140,55 +140,93 @@ export function submittedRecords(records: CacheDbRecord[]): CacheDbRecord[] {
 }
 
 /**
- * Delete one request's downloaded files and its db.json record. Mirrors
- * ServiceXClient.delete_transform_from_cache in the Python client: looks the
- * record up by request_id, removes its data_dir from disk (if any - a still-
- * SUBMITTED record has none), then removes the db.json entry. Returns
- * whether a matching record was actually found and removed.
+ * Every per-request directory the servicex client has created under
+ * `cachePath`, by request id. The client mkdirs `<cache_path>/<request_id>`
+ * as soon as it first polls a transform's status, but only writes a db.json
+ * record once the whole download finishes - so a cancelled or failed
+ * transform leaves a directory here with no record at all. Listing the
+ * directory itself is the only way to see (and clean up) those.
  */
-export function deleteCacheRecord(cachePath: string, requestId: string): boolean {
-  const dbPath = path.join(cachePath, '.servicex', 'db.json');
-  if (!fs.existsSync(dbPath)) {
-    return false;
+export function listCacheDirectories(cachePath: string): string[] {
+  try {
+    return fs
+      .readdirSync(cachePath, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== '.servicex')
+      .map((e) => e.name);
+  } catch {
+    return [];
   }
-
-  const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-  const table = raw['_default'] ?? {};
-
-  let dataDir: string | undefined;
-  let found = false;
-  for (const key of Object.keys(table)) {
-    if (table[key]?.request_id === requestId) {
-      dataDir = table[key].data_dir as string | undefined;
-      delete table[key];
-      found = true;
-    }
-  }
-  if (!found) {
-    return false;
-  }
-
-  raw['_default'] = table;
-  fs.writeFileSync(dbPath, JSON.stringify(raw));
-  if (dataDir) {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-  return true;
 }
 
 /**
- * Delete every locally cached request with the given title, completed or
- * still SUBMITTED - i.e. the entire group as shown in the tree.
+ * Delete one request's downloaded files and its db.json record. Mirrors
+ * ServiceXClient.delete_transform_from_cache in the Python client: looks the
+ * record up by request_id and removes its data_dir from disk, then removes
+ * the db.json entry.
+ *
+ * Also removes `<cachePath>/<requestId>` - the path the client derives when
+ * it creates the download directory - so this cleans up a request whose
+ * record never recorded a data_dir (still SUBMITTED) or has no record at all
+ * (cancelled/failed, where the directory would otherwise be stranded with no
+ * way to delete it). Returns whether anything was actually removed.
  */
-export function deleteAllForTitle(cachePath: string, title: string): number {
-  const matches = readCacheRecords(cachePath).records.filter((r) => r.request_id && r.title === title);
-  let count = 0;
-  for (const r of matches) {
-    if (r.request_id && deleteCacheRecord(cachePath, r.request_id)) {
-      count++;
+export function deleteCacheRecord(cachePath: string, requestId: string): boolean {
+  const dbPath = path.join(cachePath, '.servicex', 'db.json');
+  const dataDirs = new Set<string>([path.join(cachePath, requestId)]);
+  let found = false;
+
+  if (fs.existsSync(dbPath)) {
+    const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    const table = raw['_default'] ?? {};
+    for (const key of Object.keys(table)) {
+      if (table[key]?.request_id === requestId) {
+        if (typeof table[key].data_dir === 'string') {
+          dataDirs.add(table[key].data_dir);
+        }
+        delete table[key];
+        found = true;
+      }
+    }
+    if (found) {
+      raw['_default'] = table;
+      fs.writeFileSync(dbPath, JSON.stringify(raw));
     }
   }
-  return count;
+
+  for (const dir of dataDirs) {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      found = true;
+    }
+  }
+  return found;
+}
+
+/**
+ * Every regular file under `dirPath`, recursively, as paths relative to it -
+ * what's actually been downloaded for a request, read from disk rather than
+ * from the db.json record's file_list (which doesn't exist at all for a
+ * still-running request, or for a cancelled one whose record is gone).
+ * Sorted for a stable display order; empty for a path that doesn't exist.
+ */
+export function listDirectoryFiles(dirPath: string, prefix = ''): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const entry of entries) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      files.push(...listDirectoryFiles(path.join(dirPath, entry.name), relative));
+    } else if (entry.isFile()) {
+      files.push(relative);
+    }
+  }
+  return files.sort();
 }
 
 export interface DirectoryStats {
