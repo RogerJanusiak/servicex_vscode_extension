@@ -2,6 +2,53 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [0.5.0] - 2026-08-01
+
+### Added
+
+- **Dashboard Transforms** panel: a second view listing every transform the
+  configured token can see on each backend, not just what's been downloaded
+  locally. Shares the same grouping, filtering and sorting as the cache
+  panel. With more than one backend configured, transforms are split into a
+  tab per facility - one that returned nothing still gets a tab showing an
+  empty state, and one that failed to load shows the actual error rather
+  than silently disappearing. Capped at the 30 most recent transforms per
+  backend so a busy facility can't crowd out a quieter one.
+- **Cancel Transform**: an inline button on any still-running request in the
+  Dashboard panel, with a confirmation. Note it stops the transform
+  server-side only - files already downloaded stay on disk, and can now be
+  removed from the cache panel.
+- **Live progress**: expanding a still-running request shows a progress bar
+  and refreshes it every few seconds until it finishes or the row is
+  collapsed. Only expanded rows are polled.
+- The Cached Transforms panel now shows the current size of a running
+  transform's output, where the backend supports reporting it.
+- **Delete All Cached Transforms** and **Clean All Groups** commands, both
+  showing how many requests and how much disk they'll free before asking to
+  confirm.
+
+### Fixed
+
+- The cache panel now lists every request directory on disk, not just those
+  still recorded in `db.json`. The servicex client creates a download
+  directory as soon as a transform starts but only records it on success -
+  so cancelled, failed, and re-run transforms left directories behind that
+  were invisible to the panel and impossible to delete from it. These now
+  appear with their real title and status, and can be deleted individually,
+  by group, or all at once.
+- **Delete Entire Group** deleted nothing when a group contained cancelled
+  requests, because it matched records by title in `db.json` and those
+  requests have no record at all. It now deletes by request ID, and covers
+  the whole group rather than only the rows a filter leaves visible.
+- Downloaded-file counts and sizes are read from disk, so they're shown for
+  requests whose cache record no longer exists.
+- An expanded request's details stayed frozen at whatever was true when it
+  was first expanded, even after a manual refresh.
+- Fewer redundant network calls: one API connection is now shared per
+  backend for the whole session instead of being rebuilt on every fetch and
+  expansion, which was forcing a token refresh and capability check each
+  time. A finished transform's size is only looked up once.
+
 ## [0.4.1] - 2026-07-31
 
 ### Added
