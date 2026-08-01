@@ -48,6 +48,7 @@ function parseTransformStatus(o: any): TransformStatus {
  */
 export class ServiceXApi {
   private accessToken?: string;
+  private capabilities?: string[];
 
   constructor(private readonly endpoint: string, private readonly refreshToken?: string) {}
 
@@ -97,5 +98,82 @@ export class ServiceXApi {
       throw new Error(`ServiceX WebAPI error ${res.status}`);
     }
     return parseTransformStatus(await res.json());
+  }
+
+  /**
+   * Every transform visible to this token on this backend - mirrors
+   * ServiceXAdapter.get_transforms in the Python client, which is what the
+   * web dashboard itself calls to list "my" transforms. No id in the path
+   * (unlike getTransformStatus), and the response wraps the same per-
+   * transform shape in a "requests" array instead of returning one directly.
+   */
+  async getAllTransforms(): Promise<TransformStatus[]> {
+    const res = await this.getWithAuth('/servicex/transformation');
+    if (!res.ok) {
+      throw new Error(`ServiceX WebAPI error ${res.status}`);
+    }
+    const body: any = await res.json();
+    return (body.requests ?? []).map(parseTransformStatus);
+  }
+
+  /**
+   * Cancels a running transform. Mirrors ServiceXAdapter.cancel_transform in
+   * the Python client - a GET request, not a more RESTful POST/DELETE, since
+   * that's the real shape of this endpoint on the backend.
+   */
+  async cancelTransform(requestId: string): Promise<void> {
+    const res = await this.getWithAuth(`/servicex/transformation/${requestId}/cancel`);
+    if (res.status === 404) {
+      throw new NotFoundError(`Transform ID ${requestId} not found`);
+    }
+    if (!res.ok) {
+      throw new Error(`ServiceX WebAPI error ${res.status}`);
+    }
+  }
+
+  /**
+   * The capability strings this backend advertises (e.g.
+   * "poll_local_transformation_results") - mirrors
+   * ServiceXAdapter.get_servicex_capabilities. Memoized per instance for the
+   * same reason the Python client caches it: it's static for the lifetime of
+   * a connection to one backend, so there's no reason to refetch it for every
+   * row a caller happens to check.
+   */
+  private async getCapabilities(): Promise<string[]> {
+    if (this.capabilities) {
+      return this.capabilities;
+    }
+    const res = await this.getWithAuth('/servicex');
+    if (!res.ok) {
+      throw new Error(`ServiceX WebAPI error ${res.status}`);
+    }
+    const body: any = await res.json();
+    this.capabilities = body.capabilities ?? [];
+    return this.capabilities!;
+  }
+
+  /**
+   * Total bytes produced so far for a transform, summed from its completed
+   * result files - mirrors ServiceXAdapter.get_transformation_results, which
+   * is what backs the "current size" the web dashboard shows for a transform
+   * (running or finished). Not every backend supports this - it's gated
+   * behind the "poll_local_transformation_results" capability - so this
+   * returns undefined rather than throwing when that's missing, letting a
+   * caller simply omit size instead of treating it as a hard failure.
+   */
+  async getTransformSize(requestId: string): Promise<number | undefined> {
+    const capabilities = await this.getCapabilities();
+    if (!capabilities.includes('poll_local_transformation_results')) {
+      return undefined;
+    }
+    const res = await this.getWithAuth(`/servicex/transformation/${requestId}/results`);
+    if (!res.ok) {
+      throw new Error(`ServiceX WebAPI error ${res.status}`);
+    }
+    const body: any = await res.json();
+    const results: any[] = body.results ?? [];
+    return results
+      .filter((r) => r.transform_status === 'success')
+      .reduce((sum, r) => sum + (r['total-bytes'] ?? 0), 0);
   }
 }

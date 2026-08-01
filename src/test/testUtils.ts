@@ -2,7 +2,7 @@ import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
 import * as serviceXApiModule from '../serviceXApi';
 import { NotFoundError, TransformStatus } from '../serviceXApi';
-import { CacheEntry } from '../cacheTreeProvider';
+import { CacheEntry, clearServiceXApiCache } from '../cacheTreeProvider';
 import { CacheDbRecord } from '../cacheDb';
 import { EndpointConfig } from '../config';
 
@@ -30,6 +30,12 @@ export function restoreStubs(): void {
     const s = activeStubs.pop()!;
     s.obj[s.key] = s.original;
   }
+  // cacheTreeProvider.ts keeps its own session-lifetime caches (ServiceXApi
+  // instances, terminal-transform sizes) outside this stub-tracking system -
+  // without clearing them here too, one test's cached api/size (built
+  // against whatever it stubbed) would leak into the next test that reuses
+  // the same endpoint or requestId.
+  clearServiceXApiCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -80,12 +86,31 @@ export function stubCacheRecords(records: CacheDbRecord[] | (() => CacheDbRecord
   stub(cacheDbModule, 'readCacheRecords', () => ({ records: getRecords(), corrupted: 0 }));
 }
 
+export interface StubServiceXApiOptions {
+  /** requestId -> size in bytes for getTransformSize(); an Error simulates
+   *  the fetch itself failing. A requestId with no entry resolves undefined,
+   *  simulating a backend without the results capability. */
+  sizeByRequestId?: Record<string, number | Error>;
+  /** requestId -> Error to make cancelTransform() reject for that id; a
+   *  requestId with no entry succeeds. */
+  cancelErrorByRequestId?: Record<string, Error>;
+  /** Records every cancelTransform() call, in order, for assertions. */
+  onCancel?: (requestId: string) => void;
+}
+
 /** Fakes just enough of ServiceXApi to drive CacheTreeProvider.getChildren()
  *  end-to-end without any real network or filesystem access. Routes by the
  *  endpoint URL that CacheTreeProvider constructed it with; a missing id
- *  raises NotFoundError, an Error value is thrown as-is. */
+ *  raises NotFoundError, an Error value is thrown as-is.
+ *
+ *  `allTransformsData` backs getAllTransforms() (the dashboard source) the
+ *  same way `backendData` backs getTransformStatus() (the cache source) -
+ *  an endpoint with no entry returns [], and an Error value is thrown as-is
+ *  to simulate one backend failing without touching the others. */
 export function stubServiceXApi(
-  backendData: Record<string, Record<string, TransformStatus | Error>>
+  backendData: Record<string, Record<string, TransformStatus | Error>>,
+  allTransformsData: Record<string, TransformStatus[] | Error> = {},
+  options: StubServiceXApiOptions = {}
 ): void {
   class FakeServiceXApi {
     constructor(private readonly endpoint: string) {}
@@ -98,6 +123,27 @@ export function stubServiceXApi(
         throw result;
       }
       return result;
+    }
+    async getAllTransforms(): Promise<TransformStatus[]> {
+      const result = allTransformsData[this.endpoint] ?? [];
+      if (result instanceof Error) {
+        throw result;
+      }
+      return result;
+    }
+    async getTransformSize(requestId: string): Promise<number | undefined> {
+      const result = options.sizeByRequestId?.[requestId];
+      if (result instanceof Error) {
+        throw result;
+      }
+      return result;
+    }
+    async cancelTransform(requestId: string): Promise<void> {
+      options.onCancel?.(requestId);
+      const err = options.cancelErrorByRequestId?.[requestId];
+      if (err) {
+        throw err;
+      }
     }
   }
   stub(serviceXApiModule, 'ServiceXApi', FakeServiceXApi);

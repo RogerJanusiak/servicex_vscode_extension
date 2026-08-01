@@ -4,18 +4,21 @@ import * as vscode from 'vscode';
 import {
   CacheEntry,
   CacheTreeProvider,
+  DASHBOARD_SOURCE,
   RequestItem,
   TitleGroupItem,
   computeCleanPlan,
   formatBytes,
+  getServiceXApi,
+  groupByTitle,
+  isTerminalStatus,
   FailureFilter,
   SortBy,
   SortDirection,
 } from './cacheTreeProvider';
 import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
-import { deleteCacheRecord, deleteAllForTitle, directorySize } from './cacheDb';
+import { deleteCacheRecord, directorySize, directoryStats } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
-import { ServiceXApi } from './serviceXApi';
 import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
 import {
   DecodedSelection,
@@ -122,6 +125,265 @@ const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[
   { label: 'Total Size (Smallest First)', sortBy: 'size', direction: 'asc' },
 ];
 
+/** Builds the "Filtered by ..." message shown in a tree view's title bar (or
+ *  clears it when nothing is filtered) - shared by the cache and dashboard
+ *  panels, which each pass their own provider/treeView. */
+function makeUpdateFilterMessage(provider: CacheTreeProvider, treeView: vscode.TreeView<unknown>): () => void {
+  return () => {
+    if (!provider.hasActiveFilter()) {
+      treeView.message = undefined;
+      return;
+    }
+    const parts: string[] = [];
+    const status = provider.getStatusFilter();
+    if (status) {
+      parts.push(`status: ${Array.from(status).join(', ')}`);
+    }
+    const backend = provider.getBackendFilter();
+    if (backend) {
+      parts.push(`backend: ${Array.from(backend).join(', ')}`);
+    }
+    const failures = provider.getFailureFilter();
+    if (failures !== 'all') {
+      parts.push(`failures: ${failures === 'withFailures' ? 'with failures only' : 'without failures only'}`);
+    }
+    const dateFilter = provider.getDateFilter();
+    if (dateFilter) {
+      const from = dateFilter.from ? dateFilter.from.toLocaleDateString() : '…';
+      const to = dateFilter.to ? dateFilter.to.toLocaleDateString() : '…';
+      parts.push(`date: ${from} → ${to}`);
+    }
+    treeView.message = `Filtered by ${parts.join(' · ')}`;
+  };
+}
+
+/** The "Filter..." hub QuickPick and each filter dimension's own picker -
+ *  shared by the cache and dashboard panels, which only differ in which
+ *  provider they act on and what to say when there's nothing to filter yet. */
+async function showFilterMenu(
+  provider: CacheTreeProvider,
+  onChange: () => void,
+  noEntriesMessage: string
+): Promise<void> {
+  await provider.ensureLoaded();
+
+  const describeSet = (s?: Set<string>) => (s ? Array.from(s).join(', ') : 'All');
+  const failureLabel: Record<FailureFilter, string> = {
+    all: 'All',
+    withFailures: 'With Failures Only',
+    withoutFailures: 'Without Failures Only',
+  };
+  const df = provider.getDateFilter();
+  const dateLabel = df
+    ? `${df.from ? df.from.toLocaleDateString() : '…'} → ${df.to ? df.to.toLocaleDateString() : '…'}`
+    : 'All Time';
+
+  const items: (vscode.QuickPickItem & { action: string })[] = [
+    { label: '$(check-all) Status', description: describeSet(provider.getStatusFilter()), action: 'status' },
+    { label: '$(server) Backend', description: describeSet(provider.getBackendFilter()), action: 'backend' },
+    { label: '$(warning) Failures', description: failureLabel[provider.getFailureFilter()], action: 'failures' },
+    { label: '$(calendar) Date Range', description: dateLabel, action: 'date' },
+  ];
+  if (provider.hasActiveFilter()) {
+    items.push({ label: '$(clear-all) Clear All Filters', action: 'clear' });
+  }
+
+  const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Choose a filter to configure' });
+  if (!pick) {
+    return;
+  }
+
+  switch (pick.action) {
+    case 'status': {
+      const statuses = provider.getAvailableStatuses();
+      if (statuses.length === 0) {
+        vscode.window.showInformationMessage(noEntriesMessage);
+        return;
+      }
+      const result = await pickMulti(statuses, provider.getStatusFilter(), 'Show requests with status...');
+      if (result !== 'cancel') {
+        provider.setStatusFilter(result);
+      }
+      break;
+    }
+    case 'backend': {
+      const backends = provider.getAvailableBackends();
+      if (backends.length === 0) {
+        vscode.window.showInformationMessage(noEntriesMessage);
+        return;
+      }
+      const result = await pickMulti(backends, provider.getBackendFilter(), 'Show requests from backend...');
+      if (result !== 'cancel') {
+        provider.setBackendFilter(result);
+      }
+      break;
+    }
+    case 'failures': {
+      const result = await pickFailureFilter(provider.getFailureFilter());
+      if (result) {
+        provider.setFailureFilter(result);
+      }
+      break;
+    }
+    case 'date': {
+      const result = await pickDateFilter();
+      if (result !== 'cancel') {
+        provider.setDateFilter(result);
+      }
+      break;
+    }
+    case 'clear':
+      provider.clearAllFilters();
+      break;
+  }
+  onChange();
+}
+
+/** The "Sort..." QuickPick - shared by the cache and dashboard panels. */
+async function showSortMenu(provider: CacheTreeProvider): Promise<void> {
+  const current = provider.getSort();
+  const pick = await vscode.window.showQuickPick(
+    SORT_CHOICES.map((choice) => ({
+      ...choice,
+      description:
+        choice.sortBy === current.sortBy && choice.direction === current.direction ? 'current' : undefined,
+    })),
+    { placeHolder: 'Sort by...' }
+  );
+  if (!pick) {
+    return;
+  }
+  provider.setSort(pick.sortBy, pick.direction);
+}
+
+/** Toggles grouping and mirrors it into a `when`-clause context key, so the
+ *  view/title menu can swap the "Group by Title"/"Ungroup" icon - shared by
+ *  the cache and dashboard panels, which use different context keys. */
+function makeSetGrouping(provider: CacheTreeProvider, contextKey: string): (enabled: boolean) => void {
+  return (enabled: boolean) => {
+    provider.setGroupingEnabled(enabled);
+    vscode.commands.executeCommand('setContext', contextKey, enabled);
+  };
+}
+
+const LIVE_POLL_INTERVAL_MS = 5000;
+
+/** What one poll tick fetches for an entry and merges back in via
+ *  CacheTreeProvider.updateEntry - the dashboard only has remote status to
+ *  go on, while the cache panel also re-scans local disk (its progress bar
+ *  and size depend on that, not on remote completion). */
+type PollFn = (entry: CacheEntry, endpoint: EndpointConfig) => Promise<Partial<CacheEntry>>;
+
+/**
+ * While a still-running row is expanded, polls it every few seconds via
+ * `pollEntry` and merges the result back into the tree (CacheTreeProvider.
+ * updateEntry) - so the progress bar and other live details stay current
+ * without the user having to manually refresh. Stops automatically once the
+ * transform reaches a terminal status, the row is collapsed, the entry
+ * disappears from the tree (e.g. an intervening full refresh dropped it), or
+ * the extension deactivates. Only ever polls rows the user actually has
+ * expanded - never the whole list - so this doesn't turn into another
+ * source of unbounded background requests. Shared by both panels; each
+ * calls this with its own `pollEntry` and its own independent timer map.
+ */
+function registerLivePolling(
+  context: vscode.ExtensionContext,
+  treeView: vscode.TreeView<unknown>,
+  provider: CacheTreeProvider,
+  pollEntry: PollFn
+): void {
+  const timers = new Map<string, ReturnType<typeof setInterval>>();
+
+  const stop = (requestId: string) => {
+    const timer = timers.get(requestId);
+    if (timer) {
+      clearInterval(timer);
+      timers.delete(requestId);
+    }
+  };
+
+  context.subscriptions.push(
+    treeView.onDidExpandElement(({ element }) => {
+      if (!(element instanceof RequestItem) || isTerminalStatus(element.entry.status)) {
+        return;
+      }
+      const requestId = element.entry.requestId;
+      const backendName = element.entry.backend;
+      if (timers.has(requestId) || !backendName) {
+        return;
+      }
+      timers.set(
+        requestId,
+        setInterval(async () => {
+          const endpoint = resolveConfig().endpoints.find((e) => e.name === backendName);
+          if (!endpoint) {
+            stop(requestId);
+            return;
+          }
+          try {
+            const patch = await pollEntry(element.entry, endpoint);
+            const stillShown = provider.updateEntry(requestId, patch);
+            if (!stillShown || (patch.status && isTerminalStatus(patch.status))) {
+              stop(requestId);
+            }
+          } catch {
+            // Transient failure (network blip, token hiccup) - leave the
+            // last known values in place and try again next tick.
+          }
+        }, LIVE_POLL_INTERVAL_MS)
+      );
+    })
+  );
+
+  context.subscriptions.push(
+    treeView.onDidCollapseElement(({ element }) => {
+      if (element instanceof RequestItem) {
+        stop(element.entry.requestId);
+      }
+    })
+  );
+
+  context.subscriptions.push({
+    dispose: () => {
+      for (const timer of timers.values()) {
+        clearInterval(timer);
+      }
+      timers.clear();
+    },
+  });
+}
+
+/** Dashboard poll: remote status only - there's no local file data at all
+ *  for a dashboard entry. */
+const pollDashboardEntry: PollFn = async (entry, endpoint) => {
+  const status = await getServiceXApi(endpoint).getTransformStatus(entry.requestId);
+  return {
+    status: status.status,
+    submitTime: status.submitTime,
+    finishTime: status.finishTime,
+    files: status.files,
+    filesCompleted: status.filesCompleted,
+    filesFailed: status.filesFailed,
+  };
+};
+
+/** Cache panel poll: remote status, plus a fresh disk scan - its progress
+ *  bar and size row are driven by what's actually downloaded (sizeBytes/
+ *  downloadedFiles), which a plain status call alone wouldn't move. */
+const pollCacheEntry: PollFn = async (entry, endpoint) => {
+  const status = await getServiceXApi(endpoint).getTransformStatus(entry.requestId);
+  const stats = entry.dataDir ? directoryStats(entry.dataDir) : undefined;
+  return {
+    status: status.status,
+    submitTime: status.submitTime,
+    finishTime: status.finishTime,
+    files: status.files,
+    filesCompleted: status.filesCompleted,
+    filesFailed: status.filesFailed,
+    ...(stats ? { sizeBytes: stats.sizeBytes, downloadedFiles: stats.fileCount } : {}),
+  };
+};
+
 export function activate(context: vscode.ExtensionContext) {
   const cacheTreeProvider = new CacheTreeProvider();
   const treeView = vscode.window.createTreeView('servicexCacheView', {
@@ -129,6 +391,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(treeView);
   vscode.commands.executeCommand('setContext', 'servicex.groupingEnabled', true);
+  registerLivePolling(context, treeView, cacheTreeProvider, pollCacheEntry);
 
   /** Shows the total size of everything currently on disk under the cache
    *  path, as a badge next to the view title - always visible, independent
@@ -144,32 +407,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
   updateCacheSizeLabel();
 
-  const updateFilterMessage = () => {
-    if (!cacheTreeProvider.hasActiveFilter()) {
-      treeView.message = undefined;
-      return;
-    }
-    const parts: string[] = [];
-    const status = cacheTreeProvider.getStatusFilter();
-    if (status) {
-      parts.push(`status: ${Array.from(status).join(', ')}`);
-    }
-    const backend = cacheTreeProvider.getBackendFilter();
-    if (backend) {
-      parts.push(`backend: ${Array.from(backend).join(', ')}`);
-    }
-    const failures = cacheTreeProvider.getFailureFilter();
-    if (failures !== 'all') {
-      parts.push(`failures: ${failures === 'withFailures' ? 'with failures only' : 'without failures only'}`);
-    }
-    const dateFilter = cacheTreeProvider.getDateFilter();
-    if (dateFilter) {
-      const from = dateFilter.from ? dateFilter.from.toLocaleDateString() : '…';
-      const to = dateFilter.to ? dateFilter.to.toLocaleDateString() : '…';
-      parts.push(`date: ${from} → ${to}`);
-    }
-    treeView.message = `Filtered by ${parts.join(' · ')}`;
-  };
+  const updateFilterMessage = makeUpdateFilterMessage(cacheTreeProvider, treeView);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('servicex.refreshCache', () => {
@@ -184,97 +422,86 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  /**
+   * Removes every cached request - the whole panel, not just what a filter
+   * currently shows (hence getEntries() rather than the visible rows), which
+   * includes cancelled/failed requests that exist only as a directory on
+   * disk with no db.json record.
+   */
   context.subscriptions.push(
-    vscode.commands.registerCommand('servicex.openFilterMenu', async () => {
+    vscode.commands.registerCommand('servicex.deleteAllCache', async () => {
       await cacheTreeProvider.ensureLoaded();
-
-      const describeSet = (s?: Set<string>) => (s ? Array.from(s).join(', ') : 'All');
-      const failureLabel: Record<FailureFilter, string> = {
-        all: 'All',
-        withFailures: 'With Failures Only',
-        withoutFailures: 'Without Failures Only',
-      };
-      const df = cacheTreeProvider.getDateFilter();
-      const dateLabel = df
-        ? `${df.from ? df.from.toLocaleDateString() : '…'} → ${df.to ? df.to.toLocaleDateString() : '…'}`
-        : 'All Time';
-
-      const items: (vscode.QuickPickItem & { action: string })[] = [
-        {
-          label: '$(check-all) Status',
-          description: describeSet(cacheTreeProvider.getStatusFilter()),
-          action: 'status',
-        },
-        {
-          label: '$(server) Backend',
-          description: describeSet(cacheTreeProvider.getBackendFilter()),
-          action: 'backend',
-        },
-        {
-          label: '$(warning) Failures',
-          description: failureLabel[cacheTreeProvider.getFailureFilter()],
-          action: 'failures',
-        },
-        { label: '$(calendar) Date Range', description: dateLabel, action: 'date' },
-      ];
-      if (cacheTreeProvider.hasActiveFilter()) {
-        items.push({ label: '$(clear-all) Clear All Filters', action: 'clear' });
-      }
-
-      const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Choose a filter to configure' });
-      if (!pick) {
+      const entries = cacheTreeProvider.getEntries();
+      if (entries.length === 0) {
+        vscode.window.showInformationMessage('The ServiceX cache is already empty.');
         return;
       }
-
-      switch (pick.action) {
-        case 'status': {
-          const statuses = cacheTreeProvider.getAvailableStatuses();
-          if (statuses.length === 0) {
-            vscode.window.showInformationMessage('No cached transform requests to filter yet.');
-            return;
-          }
-          const result = await pickMulti(statuses, cacheTreeProvider.getStatusFilter(), 'Show requests with status...');
-          if (result !== 'cancel') {
-            cacheTreeProvider.setStatusFilter(result);
-          }
-          break;
-        }
-        case 'backend': {
-          const backends = cacheTreeProvider.getAvailableBackends();
-          if (backends.length === 0) {
-            vscode.window.showInformationMessage('No cached transform requests to filter yet.');
-            return;
-          }
-          const result = await pickMulti(
-            backends,
-            cacheTreeProvider.getBackendFilter(),
-            'Show requests from backend...'
-          );
-          if (result !== 'cancel') {
-            cacheTreeProvider.setBackendFilter(result);
-          }
-          break;
-        }
-        case 'failures': {
-          const result = await pickFailureFilter(cacheTreeProvider.getFailureFilter());
-          if (result) {
-            cacheTreeProvider.setFailureFilter(result);
-          }
-          break;
-        }
-        case 'date': {
-          const result = await pickDateFilter();
-          if (result !== 'cancel') {
-            cacheTreeProvider.setDateFilter(result);
-          }
-          break;
-        }
-        case 'clear':
-          cacheTreeProvider.clearAllFilters();
-          break;
+      const totalSize = entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+      const confirm = await vscode.window.showWarningMessage(
+        `Delete ALL ${entries.length} cached request(s)` +
+          (totalSize > 0 ? `, freeing ${formatBytes(totalSize)}` : '') +
+          '? This cannot be undone.',
+        { modal: true },
+        'Delete All'
+      );
+      if (confirm !== 'Delete All') {
+        return;
       }
-      updateFilterMessage();
+      const cachePath = resolveCachePath();
+      let count = 0;
+      for (const entry of entries) {
+        if (deleteCacheRecord(cachePath, entry.requestId)) {
+          count++;
+        }
+      }
+      vscode.window.showInformationMessage(`Deleted ${count} cached request(s).`);
+      cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
     })
+  );
+
+  /**
+   * Runs the same per-group "Clean" plan across every group at once: keeps
+   * each title's most recent completed request and drops the rest, along
+   * with every cancelled/failed one.
+   */
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.cleanAllGroups', async () => {
+      await cacheTreeProvider.ensureLoaded();
+      const toDelete = groupByTitle(cacheTreeProvider.getEntries()).flatMap((g) => computeCleanPlan(g.entries));
+      if (toDelete.length === 0) {
+        vscode.window.showInformationMessage('Nothing to clean - every group is already tidy.');
+        return;
+      }
+      const totalSize = toDelete.reduce((sum, e) => sum + e.sizeBytes, 0);
+      const confirm = await vscode.window.showWarningMessage(
+        `Clean ${toDelete.length} cached request(s) across all groups` +
+          (totalSize > 0 ? `, freeing ${formatBytes(totalSize)}` : '') +
+          ' (older completed runs plus any cancelled or failed ones), keeping each title\'s most recent ' +
+          'completed request?',
+        { modal: true },
+        'Clean'
+      );
+      if (confirm !== 'Clean') {
+        return;
+      }
+      const cachePath = resolveCachePath();
+      let count = 0;
+      for (const entry of toDelete) {
+        if (deleteCacheRecord(cachePath, entry.requestId)) {
+          count++;
+        }
+      }
+      vscode.window.showInformationMessage(`Cleaned ${count} cached request(s).`);
+      cacheTreeProvider.refresh();
+      updateCacheSizeLabel();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.openFilterMenu', () =>
+      showFilterMenu(cacheTreeProvider, updateFilterMessage, 'No cached transform requests to filter yet.')
+    )
   );
 
   context.subscriptions.push(
@@ -285,29 +512,88 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('servicex.openSortMenu', async () => {
-      const current = cacheTreeProvider.getSort();
-      const pick = await vscode.window.showQuickPick(
-        SORT_CHOICES.map((choice) => ({
-          ...choice,
-          description: choice.sortBy === current.sortBy && choice.direction === current.direction ? 'current' : undefined,
-        })),
-        { placeHolder: 'Sort by...' }
-      );
-      if (!pick) {
-        return;
-      }
-      cacheTreeProvider.setSort(pick.sortBy, pick.direction);
+    vscode.commands.registerCommand('servicex.openSortMenu', () => showSortMenu(cacheTreeProvider))
+  );
+
+  const setGrouping = makeSetGrouping(cacheTreeProvider, 'servicex.groupingEnabled');
+  context.subscriptions.push(vscode.commands.registerCommand('servicex.groupByTitle', () => setGrouping(true)));
+  context.subscriptions.push(vscode.commands.registerCommand('servicex.ungroup', () => setGrouping(false)));
+
+  // --- Dashboard panel: every transform visible to the configured token on
+  // each backend (not just what's downloaded locally). Shares the same
+  // grouping/filtering/sorting machinery as the cache panel above via
+  // CacheTreeProvider + DASHBOARD_SOURCE, but has no local-file commands
+  // (Delete/Clean/Open Cache Folder) since there's no local data to act on.
+  const dashboardTreeProvider = new CacheTreeProvider(DASHBOARD_SOURCE);
+  const dashboardTreeView = vscode.window.createTreeView('servicexDashboardView', {
+    treeDataProvider: dashboardTreeProvider,
+  });
+  context.subscriptions.push(dashboardTreeView);
+  vscode.commands.executeCommand(
+    'setContext',
+    'servicex.dashboardGroupingEnabled',
+    dashboardTreeProvider.isGroupingEnabled()
+  );
+  registerLivePolling(context, dashboardTreeView, dashboardTreeProvider, pollDashboardEntry);
+
+  const updateDashboardFilterMessage = makeUpdateFilterMessage(dashboardTreeProvider, dashboardTreeView);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.refreshDashboard', () => dashboardTreeProvider.refresh())
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.openDashboardFilterMenu', () =>
+      showFilterMenu(dashboardTreeProvider, updateDashboardFilterMessage, 'No dashboard transforms to filter yet.')
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.clearAllDashboardFilters', () => {
+      dashboardTreeProvider.clearAllFilters();
+      updateDashboardFilterMessage();
     })
   );
 
-  const setGrouping = (enabled: boolean) => {
-    cacheTreeProvider.setGroupingEnabled(enabled);
-    vscode.commands.executeCommand('setContext', 'servicex.groupingEnabled', enabled);
-  };
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.openDashboardSortMenu', () => showSortMenu(dashboardTreeProvider))
+  );
 
-  context.subscriptions.push(vscode.commands.registerCommand('servicex.groupByTitle', () => setGrouping(true)));
-  context.subscriptions.push(vscode.commands.registerCommand('servicex.ungroup', () => setGrouping(false)));
+  const setDashboardGrouping = makeSetGrouping(dashboardTreeProvider, 'servicex.dashboardGroupingEnabled');
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.groupDashboardByTitle', () => setDashboardGrouping(true))
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.ungroupDashboard', () => setDashboardGrouping(false))
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.cancelTransform', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        `Cancel the running transform for '${item.entry.title}' (${item.entry.requestId})?`,
+        { modal: true },
+        'Cancel Transform'
+      );
+      if (confirm !== 'Cancel Transform') {
+        return;
+      }
+      const endpoint = endpointForRequest(item.entry, 'cancel the transform');
+      if (!endpoint) {
+        return;
+      }
+      try {
+        await getServiceXApi(endpoint).cancelTransform(item.entry.requestId);
+      } catch (e) {
+        vscode.window.showErrorMessage(`Couldn't cancel ${item.entry.requestId}: ${(e as Error).message}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`Cancelled ${item.entry.requestId}.`);
+      dashboardTreeProvider.refresh();
+    })
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('servicex.deleteFromCache', async (item: RequestItem) => {
@@ -436,7 +722,7 @@ export function activate(context: vscode.ExtensionContext) {
             title: `Fetching the query for ${item.entry.requestId}...`,
           },
           async () => {
-            const api = new ServiceXApi(endpoint.endpoint, endpoint.token);
+            const api = getServiceXApi(endpoint);
             const status = await api.getTransformStatus(item.entry.requestId);
             if (!status.selection?.trim()) {
               return undefined;
@@ -497,15 +783,30 @@ export function activate(context: vscode.ExtensionContext) {
       if (!item) {
         return;
       }
+      const filterWarning = cacheTreeProvider.hasActiveFilter()
+        ? ' A filter is currently active - this will still remove every request for ' +
+          "this title, including ones that aren't shown right now."
+        : '';
       const confirm = await vscode.window.showWarningMessage(
-        `Delete ALL ${item.entries.length} cached request(s) for '${item.title}'? This cannot be undone.`,
+        `Delete ALL ${item.allEntries.length} cached request(s) for '${item.title}'? This cannot be undone.` +
+          filterWarning,
         { modal: true },
         'Delete All'
       );
       if (confirm !== 'Delete All') {
         return;
       }
-      const count = deleteAllForTitle(resolveCachePath(), item.title);
+      // Driven by the group's own entries rather than a db.json title
+      // lookup: a cancelled request has no db.json record at all (only a
+      // directory on disk), so a record-based lookup silently skipped it -
+      // and skipped the whole group when db.json had no records to match.
+      const cachePath = resolveCachePath();
+      let count = 0;
+      for (const entry of item.allEntries) {
+        if (deleteCacheRecord(cachePath, entry.requestId)) {
+          count++;
+        }
+      }
       vscode.window.showInformationMessage(`Deleted ${count} cached request(s) for '${item.title}'.`);
       cacheTreeProvider.refresh();
       updateCacheSizeLabel();

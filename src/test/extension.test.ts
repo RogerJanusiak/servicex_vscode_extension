@@ -115,6 +115,15 @@ suite('extension.ts - activation', () => {
       'servicex.openSortMenu',
       'servicex.groupByTitle',
       'servicex.ungroup',
+      'servicex.refreshDashboard',
+      'servicex.openDashboardFilterMenu',
+      'servicex.clearAllDashboardFilters',
+      'servicex.openDashboardSortMenu',
+      'servicex.groupDashboardByTitle',
+      'servicex.ungroupDashboard',
+      'servicex.cancelTransform',
+      'servicex.deleteAllCache',
+      'servicex.cleanAllGroups',
     ]) {
       assert.ok(commands.includes(id), `expected command ${id} to be registered`);
     }
@@ -426,13 +435,13 @@ suite('extension.ts - command handlers', () => {
     await vscode.commands.executeCommand('servicex.groupByTitle');
   });
 
-  test('servicex.deleteGroup deletes every request in the group when confirmed', async () => {
+  test('servicex.deleteGroup deletes every request in the group by id when confirmed', async () => {
     stubConfig();
     stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
-    let deletedTitle: string | undefined;
-    stub(cacheDbModule, 'deleteAllForTitle', (_cachePath: string, title: string) => {
-      deletedTitle = title;
-      return 3;
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
     });
     let infoMessage: string | undefined;
     stub(vscode.window, 'showInformationMessage', (msg: string) => {
@@ -440,11 +449,157 @@ suite('extension.ts - command handlers', () => {
       return Promise.resolve(undefined);
     });
 
-    const group = new TitleGroupItem('MyTitle', [makeEntry(), makeEntry(), makeEntry()]);
+    const group = new TitleGroupItem('MyTitle', [
+      makeEntry({ requestId: 'a' }),
+      makeEntry({ requestId: 'b' }),
+      makeEntry({ requestId: 'c' }),
+    ]);
     await vscode.commands.executeCommand('servicex.deleteGroup', group);
 
-    assert.strictEqual(deletedTitle, 'MyTitle');
+    // Deletes by request id, so a cancelled request with a directory but no
+    // db.json record is included rather than silently skipped.
+    assert.deepStrictEqual(deletedIds, ['a', 'b', 'c']);
     assert.ok(infoMessage?.includes('Deleted 3 cached request(s)'));
+  });
+
+  test('servicex.deleteAllCache deletes every loaded entry when confirmed', async () => {
+    await loadFakeCache();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.deleteAllCache');
+
+    assert.deepStrictEqual(deletedIds.sort(), ['t1', 'u1']);
+    assert.ok(infoMessage?.includes('Deleted 2 cached request(s)'));
+  });
+
+  test('servicex.deleteAllCache does nothing when the user dismisses the confirmation', async () => {
+    await loadFakeCache();
+    stub(vscode.window, 'showWarningMessage', async () => undefined);
+    let deleteCalled = false;
+    stub(cacheDbModule, 'deleteCacheRecord', () => {
+      deleteCalled = true;
+      return true;
+    });
+
+    await vscode.commands.executeCommand('servicex.deleteAllCache');
+
+    assert.strictEqual(deleteCalled, false);
+  });
+
+  test('servicex.deleteAllCache reports an already-empty cache instead of prompting', async () => {
+    stubConfig();
+    stubCacheRecords([]);
+    stubServiceXApi({});
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    let warned = false;
+    stub(vscode.window, 'showWarningMessage', async () => {
+      warned = true;
+      return undefined;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.deleteAllCache');
+
+    assert.strictEqual(warned, false, 'must not prompt when there is nothing to delete');
+    assert.ok(infoMessage?.includes('already empty'));
+  });
+
+  test('servicex.cleanAllGroups deletes only what each group\'s clean plan selects', async () => {
+    // Two titles: "Keep" has a newer and an older Complete (older should go,
+    // newer stays), "Gone" is Canceled (always goes).
+    stubConfig();
+    stubCacheRecords([
+      { request_id: 'newer', title: 'Keep', status: 'COMPLETE' },
+      { request_id: 'older', title: 'Keep', status: 'COMPLETE' },
+      { request_id: 'cancelled', title: 'Gone', status: 'CANCELED' },
+    ]);
+    stubServiceXApi({
+      'https://default.example.org': {
+        newer: fakeStatus({ requestId: 'newer', title: 'Keep', submitTime: new Date(500) }),
+        older: fakeStatus({ requestId: 'older', title: 'Keep', submitTime: new Date(100) }),
+        cancelled: fakeStatus({ requestId: 'cancelled', title: 'Gone', status: 'Canceled' }),
+      },
+    });
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    stub(vscode.window, 'showWarningMessage', async () => 'Clean');
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.cleanAllGroups');
+
+    assert.deepStrictEqual(deletedIds.sort(), ['cancelled', 'older']);
+    assert.ok(infoMessage?.includes('Cleaned 2 cached request(s)'));
+  });
+
+  test('servicex.cleanAllGroups reports nothing to clean when every group is already tidy', async () => {
+    stubConfig();
+    stubCacheRecords([{ request_id: 'only', title: 'Solo', status: 'COMPLETE' }]);
+    stubServiceXApi({
+      'https://default.example.org': { only: fakeStatus({ requestId: 'only', title: 'Solo' }) },
+    });
+    await vscode.commands.executeCommand('servicex.refreshCache');
+
+    let warned = false;
+    stub(vscode.window, 'showWarningMessage', async () => {
+      warned = true;
+      return undefined;
+    });
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    await vscode.commands.executeCommand('servicex.cleanAllGroups');
+
+    assert.strictEqual(warned, false, 'must not prompt when there is nothing to clean');
+    assert.ok(infoMessage?.includes('Nothing to clean'));
+  });
+
+  test('servicex.deleteGroup deletes the full unfiltered group, not just the visible rows', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Delete All');
+    const deletedIds: string[] = [];
+    stub(cacheDbModule, 'deleteCacheRecord', (_cachePath: string, requestId: string) => {
+      deletedIds.push(requestId);
+      return true;
+    });
+    stub(vscode.window, 'showInformationMessage', () => Promise.resolve(undefined));
+
+    // entries (visible) is a subset of allEntries (the whole group) - the
+    // "Delete ALL" wording has to mean the whole group.
+    const visible = [makeEntry({ requestId: 'a' })];
+    const all = [makeEntry({ requestId: 'a' }), makeEntry({ requestId: 'hidden-by-filter' })];
+    await vscode.commands.executeCommand(
+      'servicex.deleteGroup',
+      new TitleGroupItem('MyTitle', visible, all)
+    );
+
+    assert.deepStrictEqual(deletedIds, ['a', 'hidden-by-filter']);
   });
 
   // vscode.env.clipboard is a genuinely frozen object at runtime (unlike
@@ -654,6 +809,189 @@ suite('extension.ts - command handlers', () => {
     } finally {
       fs.rmSync(cachePath, { recursive: true, force: true });
     }
+  });
+});
+
+suite('extension.ts - dashboard command handlers', () => {
+  suiteSetup(activateExtension);
+
+  // Mirrors the cache panel's teardown above: reset the dashboard panel's
+  // own shared-provider state so tests don't leak filters/grouping/sort
+  // into each other.
+  teardown(async () => {
+    restoreStubs();
+    await vscode.commands.executeCommand('servicex.clearAllDashboardFilters');
+    await vscode.commands.executeCommand('servicex.groupDashboardByTitle');
+    stub(vscode.window, 'showQuickPick', async (items: unknown) =>
+      (items as { sortBy: string; direction: string }[]).find(
+        (i) => i.sortBy === 'date' && i.direction === 'desc'
+      )
+    );
+    await vscode.commands.executeCommand('servicex.openDashboardSortMenu');
+    restoreStubs();
+  });
+
+  test('servicex.refreshDashboard and grouping/ungrouping execute cleanly', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [] });
+
+    await vscode.commands.executeCommand('servicex.refreshDashboard');
+    await vscode.commands.executeCommand('servicex.ungroupDashboard');
+    await vscode.commands.executeCommand('servicex.groupDashboardByTitle');
+  });
+
+  test('the Dashboard Filter menu shows an info message instead of the status picker when nothing has loaded', async () => {
+    stubConfig();
+    stubServiceXApi({}, { 'https://default.example.org': [] });
+    await vscode.commands.executeCommand('servicex.refreshDashboard');
+
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    driveFilterMenu('status');
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+
+    assert.ok(infoMessage?.includes('No dashboard transforms to filter yet'));
+  });
+
+  test('servicex.clearAllDashboardFilters clears filters set through the Dashboard Filter menu', async () => {
+    stubConfig();
+    stubServiceXApi(
+      {},
+      { 'https://default.example.org': [fakeStatus({ requestId: 'a1', title: 'A', status: 'Complete' })] }
+    );
+    await vscode.commands.executeCommand('servicex.refreshDashboard');
+
+    driveFilterMenu('status', []);
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+
+    // No API to read the tree back directly (see the cache-panel note above)
+    // - clearing must simply execute without error, and a second Filter
+    // menu open should offer "All" again rather than the narrowed set.
+    let statusDescription: string | undefined;
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      statusDescription = (items as { action: string; description?: string }[]).find(
+        (i) => i.action === 'status'
+      )?.description;
+      return undefined;
+    });
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+    assert.strictEqual(statusDescription, '');
+
+    await vscode.commands.executeCommand('servicex.clearAllDashboardFilters');
+
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      statusDescription = (items as { action: string; description?: string }[]).find(
+        (i) => i.action === 'status'
+      )?.description;
+      return undefined;
+    });
+    await vscode.commands.executeCommand('servicex.openDashboardFilterMenu');
+    assert.strictEqual(statusDescription, 'All');
+  });
+
+  test('the Dashboard Sort menu offers all eight orderings, independent of the cache panel', async () => {
+    let captured: { label: string; description?: string }[] = [];
+    stub(vscode.window, 'showQuickPick', async (items: unknown) => {
+      captured = items as { label: string; description?: string }[];
+      return undefined;
+    });
+
+    await vscode.commands.executeCommand('servicex.openDashboardSortMenu');
+
+    assert.deepStrictEqual(
+      captured.map((i) => i.label),
+      [
+        'Title (A → Z)',
+        'Title (Z → A)',
+        'Date (Newest First)',
+        'Date (Oldest First)',
+        'Total Files (Most First)',
+        'Total Files (Fewest First)',
+        'Total Size (Largest First)',
+        'Total Size (Smallest First)',
+      ]
+    );
+  });
+
+  test('servicex.cancelTransform does nothing when the user dismisses the confirmation', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => undefined);
+    let cancelCalled = false;
+    stubServiceXApi({}, {}, { onCancel: () => (cancelCalled = true) });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(cancelCalled, false);
+  });
+
+  test('servicex.cancelTransform cancels and refreshes the dashboard tree when confirmed', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Cancel Transform');
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    let cancelledId: string | undefined;
+    stubServiceXApi({}, {}, { onCancel: (requestId) => (cancelledId = requestId) });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(cancelledId, 'req-1');
+    assert.ok(infoMessage?.includes('Cancelled req-1'));
+  });
+
+  test('servicex.cancelTransform shows an error instead of an info message when the cancel call fails', async () => {
+    stubConfig();
+    stub(vscode.window, 'showWarningMessage', async () => 'Cancel Transform');
+    let errorMessage: string | undefined;
+    stub(vscode.window, 'showErrorMessage', (msg: string) => {
+      errorMessage = msg;
+      return Promise.resolve(undefined);
+    });
+    let infoCalled = false;
+    stub(vscode.window, 'showInformationMessage', () => {
+      infoCalled = true;
+      return Promise.resolve(undefined);
+    });
+    stubServiceXApi({}, {}, { cancelErrorByRequestId: { 'req-1': new Error('ServiceX WebAPI error 500') } });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', backend: 'default', status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(infoCalled, false);
+    assert.ok(errorMessage?.includes("Couldn't cancel req-1"));
+    assert.ok(errorMessage?.includes('ServiceX WebAPI error 500'));
+  });
+
+  test('servicex.cancelTransform shows an info message instead of cancelling when the entry has no known backend', async () => {
+    let cancelCalled = false;
+    stubServiceXApi({}, {}, { onCancel: () => (cancelCalled = true) });
+    stub(vscode.window, 'showWarningMessage', async () => 'Cancel Transform');
+    let infoMessage: string | undefined;
+    stub(vscode.window, 'showInformationMessage', (msg: string) => {
+      infoMessage = msg;
+      return Promise.resolve(undefined);
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-stale', backend: undefined, status: 'Running' }), {
+      contextValue: 'servicexDashboardRequest-running',
+    });
+    await vscode.commands.executeCommand('servicex.cancelTransform', item);
+
+    assert.strictEqual(cancelCalled, false);
+    assert.ok(infoMessage?.includes("Can't cancel the transform for req-stale"));
   });
 });
 
