@@ -403,6 +403,23 @@ suite('cacheTreeProvider.ts - TreeItem rendering', () => {
     assert.ok(!withoutSize.tooltip?.toString().includes('Size on disk'));
   });
 
+  test('RequestItem shows a label in its description and tooltip when set, omits both when unset', () => {
+    const labeled = new RequestItem(makeEntry({ label: 'signal region A' }));
+    const unlabeled = new RequestItem(makeEntry({ label: undefined }));
+
+    assert.ok(labeled.description?.toString().startsWith('signal region A · '));
+    assert.ok(labeled.tooltip?.toString().includes('Label: signal region A'));
+    assert.ok(!unlabeled.description?.toString().includes('·'));
+    assert.ok(!unlabeled.tooltip?.toString().includes('Label:'));
+  });
+
+  test('RequestItem puts the label before the title in the description when both are shown', () => {
+    const item = new RequestItem(makeEntry({ label: 'signal region A', title: 'MyRequest' }), { showTitle: true });
+
+    const description = item.description!.toString();
+    assert.ok(description.indexOf('signal region A') < description.indexOf('MyRequest'));
+  });
+
   test('buildRequestDetails always includes request ID and file counts', () => {
     const details = buildRequestDetails(
       makeEntry({ requestId: 'req-42', filesCompleted: 8, filesFailed: 2, files: 10 })
@@ -670,6 +687,46 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
       assert.strictEqual(byId.get('submitted')?.downloadedFiles, 0);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('applies a label from .servicex/labels.json onto the matching entry, leaving unlabeled entries alone', async () => {
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-labels-test-'));
+    try {
+      fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+      fs.writeFileSync(
+        path.join(cachePath, '.servicex', 'labels.json'),
+        JSON.stringify({ labeled: 'signal region A' })
+      );
+
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([
+        { request_id: 'labeled', title: 'A', status: 'COMPLETE' },
+        { request_id: 'unlabeled', title: 'B', status: 'COMPLETE' },
+      ]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          labeled: fakeStatus({ requestId: 'labeled', title: 'A' }),
+          unlabeled: fakeStatus({ requestId: 'unlabeled', title: 'B' }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const allEntries = (await Promise.all(roots.map((r) => provider.getChildren(r))))
+        .flat()
+        .map((n) => (n as RequestItem).entry);
+      const byId = new Map(allEntries.map((e) => [e.requestId, e]));
+
+      assert.strictEqual(byId.get('labeled')?.label, 'signal region A');
+      assert.strictEqual(byId.get('unlabeled')?.label, undefined);
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
     }
   });
 

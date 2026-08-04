@@ -8,6 +8,7 @@ import {
   submittedRecords,
   directoryStats,
   listCacheDirectories,
+  readLabels,
   CacheDbRecord,
 } from './cacheDb';
 
@@ -80,6 +81,12 @@ export interface CacheEntry {
    *  transform status doesn't report it. Shown in the header of the query
    *  document; undefined when there's no local record to read it from. */
   codegen?: string;
+  /** User-set label for this request, from the extension's own
+   *  `.servicex/labels.json` (see cacheDb.ts) - independent of anything the
+   *  backend or servicex client itself knows about. Only ever set for a
+   *  cache-panel entry; the dashboard has no local cache directory to keep
+   *  labels.json in. */
+  label?: string;
 }
 
 /** Formats a byte count as a human-readable size, e.g. "512 B", "1.5 KB", "128.4 MB". */
@@ -317,10 +324,12 @@ export class RequestItem extends vscode.TreeItem {
   constructor(public readonly entry: CacheEntry, options?: { showTitle?: boolean; contextValue?: string }) {
     super(entry.status, vscode.TreeItemCollapsibleState.Collapsed);
     this.description =
+      (entry.label ? `${entry.label} · ` : '') +
       (options?.showTitle ? `${entry.title} · ` : '') +
       `${padDateTime(formatDateTime(entry.submitTime))} → ${formatDateTime(entry.finishTime)}`;
     this.tooltip = [
       `Title: ${entry.title}`,
+      ...(entry.label ? [`Label: ${entry.label}`] : []),
       `Request ID: ${entry.requestId}`,
       `Status: ${entry.status}`,
       `Submitted: ${formatDateTime(entry.submitTime)}`,
@@ -791,9 +800,10 @@ async function fetchCacheEntries(): Promise<FetchResult> {
     }
   }
 
+  const labels = readLabels(config.cachePath);
   const entries = await Promise.all(
     Array.from(localByRequestId.entries()).map(([requestId, local]) =>
-      fetchOneEntry(namedApis, requestId, local, config.cachePath)
+      fetchOneEntry(namedApis, requestId, local, config.cachePath, labels[requestId])
     )
   );
   return { entries };
@@ -974,7 +984,8 @@ async function fetchOneEntry(
   apis: { name: string; api: ServiceXApi }[],
   requestId: string,
   local: CacheDbRecord,
-  cachePath?: string
+  cachePath?: string,
+  label?: string
 ): Promise<CacheEntry> {
   let lastError: unknown;
 
@@ -998,6 +1009,7 @@ async function fetchOneEntry(
         downloadedFiles: stats.fileCount,
         dataDir: localDataDir(local, cachePath, requestId),
         codegen: localCodegen(local),
+        label,
       };
     } catch (e) {
       lastError = e;
@@ -1030,6 +1042,7 @@ async function fetchOneEntry(
     downloadedFiles: stats.fileCount,
     dataDir: localDataDir(local, cachePath, requestId),
     codegen: localCodegen(local),
+    label,
   };
 }
 

@@ -17,7 +17,7 @@ import {
   SortDirection,
 } from './cacheTreeProvider';
 import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
-import { deleteCacheRecord, directorySize, directoryStats } from './cacheDb';
+import { deleteCacheRecord, directorySize, directoryStats, setLabel } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
 import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
 import {
@@ -616,6 +616,38 @@ export function activate(context: vscode.ExtensionContext) {
       );
       cacheTreeProvider.refresh();
       updateCacheSizeLabel();
+    })
+  );
+
+  /**
+   * Sets (or clears, on a blank submission) a free-text label for one cached
+   * request. Stored in the extension's own `.servicex/labels.json` (see
+   * cacheDb.ts) rather than anywhere the servicex Python client reads or
+   * writes, since there's no field for this in the client's own db.json
+   * schema. Applies straight to the shared provider via updateEntry rather
+   * than a full refresh, since nothing about the underlying request itself
+   * changed.
+   */
+  context.subscriptions.push(
+    vscode.commands.registerCommand('servicex.setLabel', async (item: RequestItem) => {
+      if (!item) {
+        return;
+      }
+      const input = await vscode.window.showInputBox({
+        prompt: `Label for '${item.entry.title}' (${item.entry.requestId})`,
+        placeHolder: 'Leave blank to clear the label',
+        value: item.entry.label ?? '',
+      });
+      if (input === undefined) {
+        return;
+      }
+      const label = input.trim() || undefined;
+      setLabel(resolveCachePath(), item.entry.requestId, label);
+      cacheTreeProvider.updateEntry(item.entry.requestId, { label });
+      vscode.window.setStatusBarMessage(
+        label ? `Label set for ${item.entry.requestId}` : `Label cleared for ${item.entry.requestId}`,
+        3000
+      );
     })
   );
 

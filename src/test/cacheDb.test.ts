@@ -10,6 +10,8 @@ import {
   directorySize,
   directoryStats,
   listCacheDirectories,
+  readLabels,
+  setLabel,
 } from '../cacheDb';
 
 function mkTmpDir(): string {
@@ -291,5 +293,78 @@ suite('cacheDb.ts', () => {
     buildFixture(cachePath, { '1': { request_id: 'req-a', title: 'A', status: 'COMPLETE' } });
 
     assert.strictEqual(deleteCacheRecord(cachePath, 'does-not-exist'), false);
+  });
+
+  test('readLabels returns {} when labels.json does not exist yet', () => {
+    assert.deepStrictEqual(readLabels(cachePath), {});
+  });
+
+  test('setLabel then readLabels round-trips a label, creating .servicex/ if needed', () => {
+    setLabel(cachePath, 'req-a', 'signal region A');
+
+    assert.deepStrictEqual(readLabels(cachePath), { 'req-a': 'signal region A' });
+  });
+
+  test('setLabel trims surrounding whitespace', () => {
+    setLabel(cachePath, 'req-a', '  signal region A  ');
+
+    assert.deepStrictEqual(readLabels(cachePath), { 'req-a': 'signal region A' });
+  });
+
+  test('setLabel overwrites an existing label for the same request', () => {
+    setLabel(cachePath, 'req-a', 'first');
+    setLabel(cachePath, 'req-a', 'second');
+
+    assert.deepStrictEqual(readLabels(cachePath), { 'req-a': 'second' });
+  });
+
+  test('setLabel(undefined) clears a label, leaving other labels untouched', () => {
+    setLabel(cachePath, 'req-a', 'keep me');
+    setLabel(cachePath, 'req-b', 'clear me');
+
+    setLabel(cachePath, 'req-b', undefined);
+
+    assert.deepStrictEqual(readLabels(cachePath), { 'req-a': 'keep me' });
+  });
+
+  test('setLabel treats a blank/whitespace-only string as a clear, not an empty label', () => {
+    setLabel(cachePath, 'req-a', 'something');
+
+    setLabel(cachePath, 'req-a', '   ');
+
+    assert.deepStrictEqual(readLabels(cachePath), {});
+  });
+
+  test('setLabel clearing a request with no label is a no-op that does not create labels.json', () => {
+    fs.mkdirSync(cachePath, { recursive: true });
+
+    setLabel(cachePath, 'never-labeled', undefined);
+
+    assert.strictEqual(fs.existsSync(path.join(cachePath, '.servicex', 'labels.json')), false);
+  });
+
+  test('readLabels tolerates a corrupted labels.json by treating it as empty', () => {
+    fs.mkdirSync(path.join(cachePath, '.servicex'), { recursive: true });
+    fs.writeFileSync(path.join(cachePath, '.servicex', 'labels.json'), '{not valid json');
+
+    assert.deepStrictEqual(readLabels(cachePath), {});
+  });
+
+  test('deleteCacheRecord also clears the deleted request\'s label', () => {
+    buildFixture(cachePath, { '1': { request_id: 'req-a', title: 'A', status: 'COMPLETE' } });
+    setLabel(cachePath, 'req-a', 'signal region A');
+    setLabel(cachePath, 'req-b', 'unrelated');
+
+    deleteCacheRecord(cachePath, 'req-a');
+
+    assert.deepStrictEqual(readLabels(cachePath), { 'req-b': 'unrelated' });
+  });
+
+  test('deleteCacheRecord on a request with no label leaves other labels alone and does not error', () => {
+    buildFixture(cachePath, { '1': { request_id: 'req-a', title: 'A', status: 'COMPLETE' } });
+    setLabel(cachePath, 'req-b', 'unrelated');
+
+    assert.doesNotThrow(() => deleteCacheRecord(cachePath, 'req-a'));
+    assert.deepStrictEqual(readLabels(cachePath), { 'req-b': 'unrelated' });
   });
 });

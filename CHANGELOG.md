@@ -2,6 +2,18 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [0.6.0] - 2026-08-04
+
+### Added
+
+- **Set Label**: right-click a cached request to attach a free-text label to
+  it, shown at the front of its row and in its tooltip. Stored in the
+  extension's own `.servicex/labels.json` inside the cache folder -
+  independent of anything the servicex Python client's own `db.json` knows
+  about - so it survives refreshes and multi-backend fallbacks alike.
+  Leaving the label blank clears it, and deleting a request clears its label
+  too.
+
 ## [0.5.0] - 2026-08-01
 
 ### Added

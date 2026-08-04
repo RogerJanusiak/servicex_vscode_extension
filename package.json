@@ -2,7 +2,7 @@
   "name": "servicex-vscode-extension",
   "displayName": "ServiceX Helper",
   "description": "Manage ServiceX transform caches and jobs from VS Code",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "RogerJanusiak",
   "license": "BSD-3-Clause",
   "icon": "resources/icon.png",
@@ -33,6 +33,11 @@
         "command": "servicex.deleteFromCache",
         "title": "ServiceX: Delete from Cache",
         "icon": "$(trash)"
+      },
+      {
+        "command": "servicex.setLabel",
+        "title": "ServiceX: Set Label",
+        "icon": "$(tag)"
       },
       {
         "command": "servicex.cleanGroup",
@@ -247,6 +252,11 @@
           "command": "servicex.deleteFromCache",
           "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
           "group": "inline"
+        },
+        {
+          "command": "servicex.setLabel",
+          "when": "view == servicexCacheView && viewItem == servicexCacheRequest",
+          "group": "0_label@1"
         },
         {
           "command": "servicex.copyRequestId",

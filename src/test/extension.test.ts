@@ -102,6 +102,7 @@ suite('extension.ts - activation', () => {
     for (const id of [
       'servicex.refreshCache',
       'servicex.deleteFromCache',
+      'servicex.setLabel',
       'servicex.cleanGroup',
       'servicex.deleteGroup',
       'servicex.copyRequestId',
@@ -182,6 +183,61 @@ suite('extension.ts - command handlers', () => {
 
     assert.strictEqual(deletedRequestId, 'req-1');
     assert.ok(infoMessage?.includes('Deleted cached files for req-1'));
+  });
+
+  test('servicex.setLabel does nothing when the input box is dismissed', async () => {
+    stub(vscode.window, 'showInputBox', async () => undefined);
+    let setLabelCalled = false;
+    stub(cacheDbModule, 'setLabel', () => {
+      setLabelCalled = true;
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1' }));
+    await vscode.commands.executeCommand('servicex.setLabel', item);
+
+    assert.strictEqual(setLabelCalled, false);
+  });
+
+  test('servicex.setLabel persists a trimmed label for the request', async () => {
+    stubConfig();
+    stub(vscode.window, 'showInputBox', async () => '  signal region A  ');
+    let captured: { cachePath: string; requestId: string; label: string | undefined } | undefined;
+    stub(cacheDbModule, 'setLabel', (cachePath: string, requestId: string, label: string | undefined) => {
+      captured = { cachePath, requestId, label };
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', title: 'MyTitle' }));
+    await vscode.commands.executeCommand('servicex.setLabel', item);
+
+    assert.strictEqual(captured?.requestId, 'req-1');
+    assert.strictEqual(captured?.label, 'signal region A');
+  });
+
+  test('servicex.setLabel pre-fills the prompt with the current label', async () => {
+    let promptedValue: string | undefined;
+    stub(vscode.window, 'showInputBox', async (options: vscode.InputBoxOptions) => {
+      promptedValue = options.value;
+      return undefined;
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', label: 'existing label' }));
+    await vscode.commands.executeCommand('servicex.setLabel', item);
+
+    assert.strictEqual(promptedValue, 'existing label');
+  });
+
+  test('servicex.setLabel clears the label when the input is submitted blank', async () => {
+    stubConfig();
+    stub(vscode.window, 'showInputBox', async () => '   ');
+    let capturedLabel: string | undefined | 'unset' = 'unset';
+    stub(cacheDbModule, 'setLabel', (_cachePath: string, _requestId: string, label: string | undefined) => {
+      capturedLabel = label;
+    });
+
+    const item = new RequestItem(makeEntry({ requestId: 'req-1', label: 'existing label' }));
+    await vscode.commands.executeCommand('servicex.setLabel', item);
+
+    assert.strictEqual(capturedLabel, undefined);
   });
 
   test('servicex.cleanGroup shows "nothing to clean" without prompting when there is nothing to delete', async () => {

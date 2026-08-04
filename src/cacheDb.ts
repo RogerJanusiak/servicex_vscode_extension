@@ -199,7 +199,74 @@ export function deleteCacheRecord(cachePath: string, requestId: string): boolean
       found = true;
     }
   }
+  // Clears any label set for this request too - a label with nothing left
+  // to label is orphaned data, not something worth keeping around for a
+  // request id that could later be reused.
+  setLabel(cachePath, requestId, undefined);
   return found;
+}
+
+const LABELS_FILENAME = 'labels.json';
+
+function labelsPath(cachePath: string): string {
+  return path.join(cachePath, '.servicex', LABELS_FILENAME);
+}
+
+/**
+ * Reads the extension's own request_id -> label map from
+ * `<cachePath>/.servicex/labels.json`. This file belongs entirely to the
+ * extension - unlike db.json, the servicex Python client never reads or
+ * writes it - so a missing or unreadable file just means "no labels set
+ * yet"; there's no truncated-write recovery to do here the way there is for
+ * db.json.
+ */
+export function readLabels(cachePath: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(labelsPath(cachePath), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Writes `labels` via a temp file + rename rather than a direct
+ * writeFileSync, so a crash mid-write can't leave labels.json truncated the
+ * way db.json can be - there's no recovery logic for this file, so it's
+ * simpler to just not have that failure mode.
+ */
+function writeLabels(cachePath: string, labels: Record<string, string>): void {
+  const dir = path.join(cachePath, '.servicex');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = labelsPath(cachePath);
+  const tmpPath = `${target}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(labels));
+  fs.renameSync(tmpPath, target);
+}
+
+/**
+ * Sets one request's label, or clears it when `label` is undefined or blank
+ * (rather than storing an empty string) - so "no label" reads the same way
+ * whether a label was never set or was explicitly cleared. A clear that
+ * matches nothing already there is a no-op, not a write, since most requests
+ * never get a label and deleteCacheRecord calls this unconditionally for
+ * every request it removes.
+ */
+export function setLabel(cachePath: string, requestId: string, label: string | undefined): void {
+  const labels = readLabels(cachePath);
+  const trimmed = label?.trim();
+  if (trimmed) {
+    if (labels[requestId] === trimmed) {
+      return;
+    }
+    labels[requestId] = trimmed;
+  } else {
+    if (!(requestId in labels)) {
+      return;
+    }
+    delete labels[requestId];
+  }
+  writeLabels(cachePath, labels);
 }
 
 export interface DirectoryStats {
