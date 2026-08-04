@@ -2,6 +2,20 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [0.6.1] - 2026-08-04
+
+### Fixed
+
+- **Copy File List** now finds files that are actually on disk instead of
+  only the local cache record's `file_list`, which the servicex Python
+  client writes only once a download fully finishes. It was reporting "no
+  downloaded files" for a cancelled, still-running, or record-less request
+  even when the panel itself was already showing real downloaded files for
+  it (read straight from disk, same as this fix now does).
+- **Copy File List** now copies `{'Title': ['file1', ...]}` - the same
+  format printing a `deliver()` result would show for that sample - instead
+  of one bare path per line, so it can be pasted straight into a script.
+
 ## [0.6.0] - 2026-08-04
 
 ### Added

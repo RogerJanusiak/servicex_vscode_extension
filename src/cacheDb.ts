@@ -315,3 +315,30 @@ export function directoryStats(dirPath: string): DirectoryStats {
 export function directorySize(dirPath: string): number {
   return directoryStats(dirPath).sizeBytes;
 }
+
+/**
+ * Full path of every regular file under `dirPath`, recursively - the actual
+ * paths "Copy File List" needs, as opposed to directoryStats()'s count.
+ * Sorted so the clipboard output (and tests) don't depend on readdir's
+ * platform-specific ordering. [] for a path that doesn't exist, same as
+ * directoryStats().
+ */
+export function listFiles(dirPath: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listFiles(fullPath));
+    } else if (entry.isFile()) {
+      files.push(fullPath);
+    }
+  }
+  return files.sort();
+}

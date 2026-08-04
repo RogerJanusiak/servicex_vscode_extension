@@ -10,6 +10,7 @@ import {
   directorySize,
   directoryStats,
   listCacheDirectories,
+  listFiles,
   readLabels,
   setLabel,
 } from '../cacheDb';
@@ -246,6 +247,35 @@ suite('cacheDb.ts', () => {
     fs.writeFileSync(path.join(nested, 'deep.root'), 'x'.repeat(30));
 
     assert.deepStrictEqual(directoryStats(cachePath), { sizeBytes: 60, fileCount: 3 });
+  });
+
+  test('listFiles returns [] for a path that does not exist', () => {
+    assert.deepStrictEqual(listFiles(path.join(cachePath, 'nope')), []);
+  });
+
+  test('listFiles returns full paths for a flat directory, sorted', () => {
+    fs.mkdirSync(cachePath, { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'b.root'), 'x');
+    fs.writeFileSync(path.join(cachePath, 'a.root'), 'x');
+
+    assert.deepStrictEqual(listFiles(cachePath), [
+      path.join(cachePath, 'a.root'),
+      path.join(cachePath, 'b.root'),
+    ]);
+  });
+
+  test('listFiles recurses into nested subdirectories, listing only regular files', () => {
+    const nested = path.join(cachePath, 'req-1', 'sub');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(cachePath, 'top.root'), 'x');
+    fs.writeFileSync(path.join(cachePath, 'req-1', 'mid.root'), 'x');
+    fs.writeFileSync(path.join(nested, 'deep.root'), 'x');
+
+    assert.deepStrictEqual(listFiles(cachePath).sort(), [
+      path.join(cachePath, 'req-1', 'mid.root'),
+      path.join(cachePath, 'req-1', 'sub', 'deep.root'),
+      path.join(cachePath, 'top.root'),
+    ].sort());
   });
 
   test('listCacheDirectories returns every request directory, skipping .servicex and loose files', () => {

@@ -17,7 +17,7 @@ import {
   SortDirection,
 } from './cacheTreeProvider';
 import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
-import { deleteCacheRecord, directorySize, directoryStats, setLabel } from './cacheDb';
+import { deleteCacheRecord, directorySize, directoryStats, listFiles, setLabel } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
 import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
 import {
@@ -112,6 +112,42 @@ async function decodeForDisplay(selection: string, scriptPath: string): Promise<
       language: 'plaintext',
     }
   );
+}
+
+/**
+ * Quotes `value` the way Python's `repr()` would: single-quoted, unless the
+ * string contains a single quote and no double quote (then double-quoted
+ * instead), with backslashes and control characters escaped.
+ */
+function pythonRepr(value: string): string {
+  const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
+  let out = quote;
+  for (const ch of value) {
+    if (ch === '\\' || ch === quote) {
+      out += `\\${ch}`;
+    } else if (ch === '\n') {
+      out += '\\n';
+    } else if (ch === '\r') {
+      out += '\\r';
+    } else if (ch === '\t') {
+      out += '\\t';
+    } else {
+      out += ch;
+    }
+  }
+  return out + quote;
+}
+
+/**
+ * Renders one sample's file list exactly the way it would print if you'd
+ * gotten it back from `deliver()` yourself: `deliver()` returns a dict
+ * mapping each Sample's title to a `GuardList` of its files, and
+ * `GuardList.__repr__` is just `repr()` of that underlying list - see
+ * `_output_handler` and `GuardList` in the servicex Python client's
+ * `servicex_client.py`. Pasteable straight into a Python script.
+ */
+function pythonFileListLiteral(title: string, files: string[]): string {
+  return `{${pythonRepr(title)}: [${files.map(pythonRepr).join(', ')}]}`;
 }
 
 const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[] = [
@@ -698,19 +734,35 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  /**
+   * Prefers what's actually on disk under dataDir over the cache record's
+   * file_list - the same precedent buildRequestDetails already follows for
+   * the downloaded-files count (cacheTreeProvider.ts). file_list is only
+   * ever written once a download fully finishes, so it's empty or absent
+   * for a still-running, cancelled, or record-less request even when files
+   * have genuinely been downloaded - which is exactly why those rows can
+   * show real files yet this command found nothing to copy. Falls back to
+   * file_list when dataDir has nothing, so this is never worse than before.
+   *
+   * Copies the result as `{'Title': ['file1', ...]}` - exactly what
+   * printing this one sample's entry from a `deliver()` result would show
+   * (see pythonFileListLiteral) - so it can be pasted straight into a
+   * script in place of calling deliver() again.
+   */
   context.subscriptions.push(
     vscode.commands.registerCommand('servicex.copyFileList', async (item: RequestItem) => {
       if (!item) {
         return;
       }
-      const fileList = item.entry.fileList ?? [];
+      const diskFiles = item.entry.dataDir ? listFiles(item.entry.dataDir) : [];
+      const fileList = diskFiles.length ? diskFiles : item.entry.fileList ?? [];
       if (fileList.length === 0) {
         vscode.window.showInformationMessage(
           `No downloaded files to copy for ${item.entry.requestId}.`
         );
         return;
       }
-      await vscode.env.clipboard.writeText(fileList.join('\n'));
+      await vscode.env.clipboard.writeText(pythonFileListLiteral(item.entry.title, fileList));
       vscode.window.setStatusBarMessage(`Copied ${fileList.length} file path(s) to clipboard`, 3000);
     })
   );

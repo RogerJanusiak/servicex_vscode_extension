@@ -670,13 +670,32 @@ suite('extension.ts - command handlers', () => {
     assert.strictEqual(await vscode.env.clipboard.readText(), 'req-xyz');
   });
 
-  test('servicex.copyFileList copies newline-joined file paths', async () => {
+  test('servicex.copyFileList copies a {title: [files]} literal matching what deliver() would print', async () => {
     await vscode.env.clipboard.writeText('sentinel-before');
 
-    const item = new RequestItem(makeEntry({ fileList: ['/a/file1.root', '/a/file2.root'] }));
+    const item = new RequestItem(
+      makeEntry({ title: 'MySample', fileList: ['/a/file1.root', '/a/file2.root'] })
+    );
     await vscode.commands.executeCommand('servicex.copyFileList', item);
 
-    assert.strictEqual(await vscode.env.clipboard.readText(), '/a/file1.root\n/a/file2.root');
+    assert.strictEqual(
+      await vscode.env.clipboard.readText(),
+      "{'MySample': ['/a/file1.root', '/a/file2.root']}"
+    );
+  });
+
+  test('servicex.copyFileList escapes quotes in titles and paths the way Python\'s repr() would', async () => {
+    await vscode.env.clipboard.writeText('sentinel-before');
+
+    const item = new RequestItem(
+      makeEntry({ title: "Roger's Sample", fileList: ["/a/it's a file.root"] })
+    );
+    await vscode.commands.executeCommand('servicex.copyFileList', item);
+
+    assert.strictEqual(
+      await vscode.env.clipboard.readText(),
+      `{"Roger's Sample": ["/a/it's a file.root"]}`
+    );
   });
 
   test('servicex.copyFileList shows an info message instead of copying when there is nothing to copy', async () => {
@@ -692,6 +711,69 @@ suite('extension.ts - command handlers', () => {
 
     assert.strictEqual(await vscode.env.clipboard.readText(), 'sentinel-before');
     assert.ok(infoMessage?.includes('No downloaded files to copy for req-empty'));
+  });
+
+  test('servicex.copyFileList copies files found on disk under dataDir even when the record has no file_list ' +
+    '(e.g. a cancelled or still-running request)', async () => {
+    // This is the bug report: the panel already shows these files (their
+    // count/size come straight from disk - see buildRequestDetails), but
+    // file_list is only ever written once a download fully finishes, so a
+    // cancelled/still-running/record-less request always has fileList
+    // undefined even though real files are sitting in dataDir.
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-copyfilelist-test-'));
+    try {
+      fs.writeFileSync(path.join(dataDir, 'b.root'), 'x');
+      fs.writeFileSync(path.join(dataDir, 'a.root'), 'x');
+      await vscode.env.clipboard.writeText('sentinel-before');
+
+      const item = new RequestItem(
+        makeEntry({ requestId: 'req-disk', title: 'MySample', dataDir, fileList: undefined })
+      );
+      await vscode.commands.executeCommand('servicex.copyFileList', item);
+
+      assert.strictEqual(
+        await vscode.env.clipboard.readText(),
+        `{'MySample': ['${path.join(dataDir, 'a.root')}', '${path.join(dataDir, 'b.root')}']}`
+      );
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('servicex.copyFileList prefers files on disk over a stale record file_list', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-copyfilelist-test-'));
+    try {
+      fs.writeFileSync(path.join(dataDir, 'current.root'), 'x');
+      await vscode.env.clipboard.writeText('sentinel-before');
+
+      const item = new RequestItem(
+        makeEntry({ requestId: 'req-both', title: 'MySample', dataDir, fileList: ['/stale/old-path.root'] })
+      );
+      await vscode.commands.executeCommand('servicex.copyFileList', item);
+
+      assert.strictEqual(
+        await vscode.env.clipboard.readText(),
+        `{'MySample': ['${path.join(dataDir, 'current.root')}']}`
+      );
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  test('servicex.copyFileList falls back to the record file_list when dataDir has nothing', async () => {
+    await vscode.env.clipboard.writeText('sentinel-before');
+
+    const item = new RequestItem(
+      makeEntry({
+        requestId: 'req-fallback',
+        title: 'MySample',
+        dataDir: '/does/not/exist',
+        fileList: ['/a/file1.root'],
+      })
+    );
+    await vscode.commands.executeCommand('servicex.copyFileList', item);
+
+    assert.strictEqual(await vscode.env.clipboard.readText(), "{'MySample': ['/a/file1.root']}");
   });
 
   test('servicex.openDashboard opens the transformation-request page for the entry\'s backend', async () => {
