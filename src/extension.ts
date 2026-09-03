@@ -19,6 +19,7 @@ import {
 import { loadConfig, ServiceXConfig, EndpointConfig } from './config';
 import { deleteCacheRecord, directorySize, directoryStats, listFiles, setLabel } from './cacheDb';
 import { pickDateFilter, pickFailureFilter, pickMulti } from './filterPrompts';
+import { pythonFileListLiteral } from './pythonRepr';
 import { decodeQastle, pythonInterpreterCandidates } from './pythonBridge';
 import {
   DecodedSelection,
@@ -112,42 +113,6 @@ async function decodeForDisplay(selection: string, scriptPath: string): Promise<
       language: 'plaintext',
     }
   );
-}
-
-/**
- * Quotes `value` the way Python's `repr()` would: single-quoted, unless the
- * string contains a single quote and no double quote (then double-quoted
- * instead), with backslashes and control characters escaped.
- */
-function pythonRepr(value: string): string {
-  const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
-  let out = quote;
-  for (const ch of value) {
-    if (ch === '\\' || ch === quote) {
-      out += `\\${ch}`;
-    } else if (ch === '\n') {
-      out += '\\n';
-    } else if (ch === '\r') {
-      out += '\\r';
-    } else if (ch === '\t') {
-      out += '\\t';
-    } else {
-      out += ch;
-    }
-  }
-  return out + quote;
-}
-
-/**
- * Renders one sample's file list exactly the way it would print if you'd
- * gotten it back from `deliver()` yourself: `deliver()` returns a dict
- * mapping each Sample's title to a `GuardList` of its files, and
- * `GuardList.__repr__` is just `repr()` of that underlying list - see
- * `_output_handler` and `GuardList` in the servicex Python client's
- * `servicex_client.py`. Pasteable straight into a Python script.
- */
-function pythonFileListLiteral(title: string, files: string[]): string {
-  return `{${pythonRepr(title)}: [${files.map(pythonRepr).join(', ')}]}`;
 }
 
 const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[] = [
