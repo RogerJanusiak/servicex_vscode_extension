@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import * as configModule from '../config';
 import * as cacheDbModule from '../cacheDb';
 import { RequestItem, TitleGroupItem } from '../cacheTreeProvider';
+import { pythonFileListLiteral } from '../pythonRepr';
 import {
   stub,
   restoreStubs,
@@ -731,9 +732,14 @@ suite('extension.ts - command handlers', () => {
       );
       await vscode.commands.executeCommand('servicex.copyFileList', item);
 
+      // Built through pythonFileListLiteral rather than interpolated raw:
+      // on Windows these paths contain backslashes, which have to come out
+      // escaped. The formatting itself is covered directly in
+      // pythonRepr.test.ts; what matters here is *which* files were picked
+      // up, and in what order.
       assert.strictEqual(
         await vscode.env.clipboard.readText(),
-        `{'MySample': ['${path.join(dataDir, 'a.root')}', '${path.join(dataDir, 'b.root')}']}`
+        pythonFileListLiteral('MySample', [path.join(dataDir, 'a.root'), path.join(dataDir, 'b.root')])
       );
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
@@ -753,7 +759,7 @@ suite('extension.ts - command handlers', () => {
 
       assert.strictEqual(
         await vscode.env.clipboard.readText(),
-        `{'MySample': ['${path.join(dataDir, 'current.root')}']}`
+        pythonFileListLiteral('MySample', [path.join(dataDir, 'current.root')])
       );
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
