@@ -454,6 +454,8 @@ suite('extension.ts - command handlers', () => {
         'Total Files (Fewest First)',
         'Total Size (Largest First)',
         'Total Size (Smallest First)',
+        'Status (A → Z)',
+        'Status (Z → A)',
       ]
     );
     // Teardown resets the shared provider to the default sort, so that is
@@ -1056,6 +1058,8 @@ suite('extension.ts - dashboard command handlers', () => {
         'Total Files (Fewest First)',
         'Total Size (Largest First)',
         'Total Size (Smallest First)',
+        'Status (A → Z)',
+        'Status (Z → A)',
       ]
     );
   });

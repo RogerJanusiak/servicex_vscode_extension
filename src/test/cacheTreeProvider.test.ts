@@ -772,6 +772,89 @@ suite('cacheTreeProvider.ts - CacheTreeProvider.getChildren (integration)', () =
     }
   });
 
+  test('a backend-Complete transform with nothing downloaded yet shows as "Waiting for Download", not "Complete"', async () => {
+    // The backend can finish producing every file before the servicex
+    // client's background download loop writes its first one - data_dir
+    // isn't recorded until that loop finishes entirely, so this record still
+    // looks SUBMITTED locally even though the remote status is Complete.
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-awaiting-test-'));
+    try {
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'SUBMITTED' }]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          r1: fakeStatus({ requestId: 'r1', title: 'A', status: 'Complete', files: 5, filesCompleted: 5 }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const [item] = (await provider.getChildren(roots[0])) as RequestItem[];
+
+      assert.strictEqual(item.label, 'Waiting for Download');
+      assert.strictEqual(provider.getAvailableStatuses().includes('Waiting for Download'), true);
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
+  });
+
+  test('a backend-Complete transform with some files already on disk shows as "Downloading", with a progress bar', async () => {
+    const cachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'servicex-downloading-test-'));
+    try {
+      const downloadDir = path.join(cachePath, 'r1');
+      fs.mkdirSync(downloadDir, { recursive: true });
+      fs.writeFileSync(path.join(downloadDir, 'file1.root'), 'x');
+      fs.writeFileSync(path.join(downloadDir, 'file2.root'), 'x');
+
+      stub(configModule, 'loadConfig', () => ({
+        endpoints: [DEFAULT_ENDPOINT],
+        defaultEndpoint: DEFAULT_ENDPOINT.name,
+        cachePath,
+        configFile: '/fake/servicex.yaml',
+      }));
+      stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'SUBMITTED' }]);
+      stubServiceXApi({
+        'https://default.example.org': {
+          r1: fakeStatus({ requestId: 'r1', title: 'A', status: 'Complete', files: 5, filesCompleted: 5 }),
+        },
+      });
+
+      const provider = new CacheTreeProvider();
+      const roots = (await provider.getChildren()) as TitleGroupItem[];
+      const [item] = (await provider.getChildren(roots[0])) as RequestItem[];
+
+      assert.strictEqual(item.label, 'Downloading');
+
+      const details = await provider.getChildren(item);
+      assert.ok(details.some((d) => d.label === 'Progress: ████████░░░░░░░░░░░░ 40% (2/5 files downloaded)'));
+    } finally {
+      fs.rmSync(cachePath, { recursive: true, force: true });
+    }
+  });
+
+  test('a Complete transform with its final data_dir on record shows as "Complete", even with no files on disk', async () => {
+    // Once query_cache.py writes data_dir, the download is guaranteed done -
+    // a since-deleted directory means the files are gone, not still arriving.
+    stubConfig();
+    stubCacheRecords([{ request_id: 'r1', title: 'A', status: 'COMPLETE', data_dir: '/fake/cache/r1' }]);
+    stubServiceXApi({
+      'https://default.example.org': {
+        r1: fakeStatus({ requestId: 'r1', title: 'A', status: 'Complete', files: 5, filesCompleted: 5 }),
+      },
+    });
+
+    const provider = new CacheTreeProvider();
+    const roots = (await provider.getChildren()) as TitleGroupItem[];
+    const [item] = (await provider.getChildren(roots[0])) as RequestItem[];
+
+    assert.strictEqual(item.label, 'Complete');
+  });
+
   test('lists a directory with no db.json record at all, resolving its real title/status from the backend', async () => {
     // The cancelled-transform case: the client made <cache_path>/<id> but
     // never wrote a record, so before this the directory was invisible to
@@ -964,7 +1047,7 @@ suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
         fetchCounter.count++;
       }
       return [
-        { request_id: 'a1', title: 'A', status: 'COMPLETE' },
+        { request_id: 'a1', title: 'A', status: 'COMPLETE', data_dir: '/fake/cache/a1' },
         { request_id: 'b1', title: 'B', status: 'FATAL' },
       ];
     });
@@ -1033,7 +1116,7 @@ suite('cacheTreeProvider.ts - CacheTreeProvider status filter', () => {
     // a1/a2 share a title so filtering can hide one but not the other.
     stubConfig();
     stubCacheRecords([
-      { request_id: 'a1', title: 'A', status: 'COMPLETE' },
+      { request_id: 'a1', title: 'A', status: 'COMPLETE', data_dir: '/fake/cache/a1' },
       { request_id: 'a2', title: 'A', status: 'CANCELED' },
     ]);
     stubServiceXApi({
@@ -1203,6 +1286,28 @@ suite('cacheTreeProvider.ts - CacheTreeProvider backend/failure/date filters, so
     const roots = (await provider.getChildren()) as TitleGroupItem[];
 
     assert.deepStrictEqual(roots.map((g) => g.title), ['Apple', 'Mango', 'Zebra']);
+  });
+
+  test('setSort("status", "asc") orders groups alphabetically by their most recent entry\'s status', async () => {
+    stubConfig();
+    stubCacheRecords([
+      { request_id: 'r1', title: 'Alpha', status: 'FATAL' },
+      { request_id: 'r2', title: 'Beta', status: 'COMPLETE', data_dir: '/fake/cache/r2' },
+      { request_id: 'r3', title: 'Gamma', status: 'CANCELED' },
+    ]);
+    stubServiceXApi({
+      'https://default.example.org': {
+        r1: fakeStatus({ requestId: 'r1', title: 'Alpha', status: 'Fatal' }),
+        r2: fakeStatus({ requestId: 'r2', title: 'Beta', status: 'Complete' }),
+        r3: fakeStatus({ requestId: 'r3', title: 'Gamma', status: 'Canceled' }),
+      },
+    });
+
+    const provider = new CacheTreeProvider();
+    provider.setSort('status', 'asc');
+    const roots = (await provider.getChildren()) as TitleGroupItem[];
+
+    assert.deepStrictEqual(roots.map((g) => g.title), ['Gamma', 'Beta', 'Alpha']);
   });
 
   test('setGroupingEnabled(false) + setSort("files", "asc") sorts the flat list fewest-files-first', async () => {

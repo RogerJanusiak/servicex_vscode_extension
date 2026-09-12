@@ -124,6 +124,8 @@ const SORT_CHOICES: { label: string; sortBy: SortBy; direction: SortDirection }[
   { label: 'Total Files (Fewest First)', sortBy: 'files', direction: 'asc' },
   { label: 'Total Size (Largest First)', sortBy: 'size', direction: 'desc' },
   { label: 'Total Size (Smallest First)', sortBy: 'size', direction: 'asc' },
+  { label: 'Status (A → Z)', sortBy: 'status', direction: 'asc' },
+  { label: 'Status (Z → A)', sortBy: 'status', direction: 'desc' },
 ];
 
 /** Builds the "Filtered by ..." message shown in a tree view's title bar (or

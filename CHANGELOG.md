@@ -2,6 +2,19 @@
 
 All notable changes to the "ServiceX Helper" extension will be documented in this file.
 
+## [0.6.2] - 2026-09-12
+
+### Added
+
+- The cache panel now distinguishes a transform the backend has finished
+  from one whose files have actually landed locally. A request the backend
+  reports `Complete` now shows as **Waiting for Download** until the
+  servicex client's background download loop writes its first file, then
+  **Downloading** (with a live progress bar) until every file is on disk -
+  instead of reading as `Complete` while a user is still waiting on their
+  files. Both are selectable in the status filter alongside the usual
+  statuses.
+
 ## [0.6.1] - 2026-08-04
 
 ### Fixed

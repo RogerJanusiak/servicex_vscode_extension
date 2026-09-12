@@ -76,6 +76,14 @@ export interface CacheEntry {
   /** Local directory holding this request's downloaded files - undefined
    *  for a still-SUBMITTED request with nothing downloaded yet. */
   dataDir?: string;
+  /** True when the backend reports this transform Complete but the local
+   *  servicex-client record has not yet been written with a final data_dir
+   *  - query_cache.py only writes that once the whole download has finished,
+   *  so this means the client is still pulling files down (or about to).
+   *  Undefined/false once data_dir is on record, or for any non-Complete
+   *  status - only ever set by the real fetch path, not by test fixtures
+   *  that don't care about this distinction. */
+  awaitingDownload?: boolean;
   /** Code generator this query was submitted with (e.g. "atlasr22",
    *  "uproot-raw", "python"), from the local cache record - the backend's
    *  transform status doesn't report it. Shown in the header of the query
@@ -100,7 +108,7 @@ export function formatBytes(bytes: number): string {
   return `${exponent === 0 ? value : value.toFixed(1)} ${units[exponent]}`;
 }
 
-export type SortBy = 'title' | 'date' | 'files' | 'size';
+export type SortBy = 'title' | 'date' | 'files' | 'size' | 'status';
 export type SortDirection = 'asc' | 'desc';
 export type FailureFilter = 'all' | 'withFailures' | 'withoutFailures';
 
@@ -115,7 +123,7 @@ export interface EntryFilters {
 /** Applies every active filter dimension to a flat list of entries. */
 export function filterEntries(entries: CacheEntry[], filters: EntryFilters): CacheEntry[] {
   return entries.filter((e) => {
-    if (filters.status && !filters.status.has(e.status)) {
+    if (filters.status && !filters.status.has(displayStatus(e))) {
       return false;
     }
     if (filters.backend && (!e.backend || !filters.backend.has(e.backend))) {
@@ -152,10 +160,13 @@ function compareEntries(a: CacheEntry, b: CacheEntry, sortBy: SortBy): number {
   if (sortBy === 'size') {
     return a.sizeBytes - b.sizeBytes;
   }
+  if (sortBy === 'status') {
+    return displayStatus(a).localeCompare(displayStatus(b));
+  }
   return (a.submitTime?.getTime() ?? 0) - (b.submitTime?.getTime() ?? 0);
 }
 
-/** Sorts a flat list of entries by title (A→Z/Z→A), submit date, total file count, or size on disk. */
+/** Sorts a flat list of entries by title (A→Z/Z→A), submit date, total file count, size on disk, or status. */
 export function sortEntries(entries: CacheEntry[], sortBy: SortBy, direction: SortDirection): CacheEntry[] {
   const sorted = [...entries];
   sorted.sort((a, b) => (direction === 'asc' ? compareEntries(a, b, sortBy) : compareEntries(b, a, sortBy)));
@@ -315,6 +326,28 @@ export class MessageItem extends vscode.TreeItem {
 }
 
 /**
+ * ServiceX reports a transform "Complete" as soon as the backend has
+ * produced every file, but the servicex-client still has to pull those
+ * files down to dataDir afterward - downloadedFiles (read from disk) lags
+ * filesCompleted (the backend's count) during that window. "Complete" would
+ * otherwise read as done to a user still waiting on their files, so the
+ * cache panel splits that window into two statuses instead: "Waiting for
+ * Download" (nothing has landed on disk yet - the transfer hasn't visibly
+ * started) and "Downloading" (at least one file has landed - the transfer
+ * is actively progressing), so it's visible which one is actually true.
+ */
+function isAwaitingDownload(entry: CacheEntry): boolean {
+  return entry.status === 'Complete' && entry.awaitingDownload === true;
+}
+
+function displayStatus(entry: CacheEntry): string {
+  if (isAwaitingDownload(entry)) {
+    return (entry.downloadedFiles ?? 0) > 0 ? 'Downloading' : 'Waiting for Download';
+  }
+  return entry.status;
+}
+
+/**
  * Shows only status and dates right away - everything else (request ID,
  * file counts, size, backend, downloaded files) is available by expanding
  * the row into its RequestDetailItem children, rather than crowding the
@@ -322,7 +355,7 @@ export class MessageItem extends vscode.TreeItem {
  */
 export class RequestItem extends vscode.TreeItem {
   constructor(public readonly entry: CacheEntry, options?: { showTitle?: boolean; contextValue?: string }) {
-    super(entry.status, vscode.TreeItemCollapsibleState.Collapsed);
+    super(displayStatus(entry), vscode.TreeItemCollapsibleState.Collapsed);
     this.description =
       (entry.label ? `${entry.label} · ` : '') +
       (options?.showTitle ? `${entry.title} · ` : '') +
@@ -331,7 +364,7 @@ export class RequestItem extends vscode.TreeItem {
       `Title: ${entry.title}`,
       ...(entry.label ? [`Label: ${entry.label}`] : []),
       `Request ID: ${entry.requestId}`,
-      `Status: ${entry.status}`,
+      `Status: ${displayStatus(entry)}`,
       `Submitted: ${formatDateTime(entry.submitTime)}`,
       `Finished: ${formatDateTime(entry.finishTime)}`,
       `Files Complete: ${entry.filesCompleted}`,
@@ -372,11 +405,14 @@ export function buildRequestDetails(entry: CacheEntry): RequestDetailItem[] {
       `Files: Complete ${entry.filesCompleted} · Failed ${entry.filesFailed} · Total ${entry.files}`
     ),
   ];
-  if (!isTerminalStatus(entry.status) && entry.files > 0) {
+  if ((!isTerminalStatus(entry.status) || isAwaitingDownload(entry)) && entry.files > 0) {
     // The cache panel counts files the servicex client has actually written
     // to disk so far, which is the number a user waiting on a download
     // cares about; the dashboard has no local files at all, so it falls
-    // back to the backend's own transform-completion count.
+    // back to the backend's own transform-completion count. A "Waiting for
+    // Download"/"Downloading" row (backend-Complete, local files still
+    // trickling in) needs this bar too - isTerminalStatus alone would hide
+    // it just because the backend is done.
     details.push(
       entry.downloadedFiles !== undefined
         ? new RequestDetailItem(progressBarLabel(entry.downloadedFiles, entry.files, 'files downloaded'))
@@ -508,7 +544,7 @@ export class CacheTreeProvider implements vscode.TreeDataProvider<CacheNode> {
 
   /** Distinct statuses among the currently loaded entries, for building a filter picker. */
   getAvailableStatuses(): string[] {
-    return Array.from(new Set(this.rawEntries.map((e) => e.status))).sort();
+    return Array.from(new Set(this.rawEntries.map((e) => displayStatus(e)))).sort();
   }
 
   /** Distinct backend names among the currently loaded entries, for building a filter picker. */
@@ -1008,6 +1044,7 @@ async function fetchOneEntry(
         sizeBytes: stats.sizeBytes,
         downloadedFiles: stats.fileCount,
         dataDir: localDataDir(local, cachePath, requestId),
+        awaitingDownload: remote.status === 'Complete' && typeof local.data_dir !== 'string',
         codegen: localCodegen(local),
         label,
       };
